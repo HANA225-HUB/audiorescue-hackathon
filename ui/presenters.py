@@ -102,6 +102,10 @@ def file_if_exists(
     *,
     allowed_roots: tuple[Path, ...] = (),
 ) -> str | None:
+    # File-bearing Gradio components can make a server-side path downloadable.
+    # No trusted result root therefore means no file, even when the path exists.
+    if not allowed_roots:
+        return None
     if not path_value:
         return None
     path = Path(str(path_value)).expanduser()
@@ -113,17 +117,16 @@ def file_if_exists(
         return None
     if not resolved.is_file():
         return None
-    if allowed_roots:
-        allowed = False
-        for root in allowed_roots:
-            try:
-                resolved.relative_to(root.resolve())
-                allowed = True
-                break
-            except (OSError, RuntimeError, ValueError):
-                continue
-        if not allowed:
-            return None
+    allowed = False
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve())
+            allowed = True
+            break
+        except (OSError, RuntimeError, ValueError):
+            continue
+    if not allowed:
+        return None
     return str(resolved)
 
 
@@ -381,9 +384,28 @@ def diff_html(result: dict[str, Any]) -> str:
 
 
 def _safe_details(details: Any) -> dict[str, Any]:
-    raw = as_dict(details)
-    blocked = {"traceback", "stack", "stacktrace", "exception", "private_path"}
-    return {key: value for key, value in raw.items() if key.lower() not in blocked}
+    blocked = {"traceback", "stack", "stacktrace", "exception"}
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            safe: dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if (
+                    lowered in blocked
+                    or lowered == "path"
+                    or lowered.endswith("_path")
+                    or lowered.endswith("path")
+                ):
+                    continue
+                safe[str(key)] = scrub(item)
+            return safe
+        if isinstance(value, (list, tuple)):
+            return [scrub(item) for item in value]
+        return value
+
+    sanitized = scrub(as_dict(details))
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def warnings_html(result: dict[str, Any]) -> str:

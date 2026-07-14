@@ -135,6 +135,43 @@ class PresenterTests(unittest.TestCase):
         self.assertIsNone(view["enhanced_audio"])
         self.assertNotIn("/etc/hosts", view["playback_note_md"])
 
+    def test_invalid_job_id_fails_closed_without_any_allowed_root(self) -> None:
+        result = {
+            "status": "success",
+            "job_id": "../bad",
+            "original_audio_path": "/etc/hosts",
+            "mixed_output_path": "/etc/hosts",
+        }
+        view = result_to_view(result)
+        self.assertIsNone(view["original_audio"])
+        self.assertIsNone(view["enhanced_audio"])
+        self.assertIsNone(view["mixed_download"])
+
+    def test_warning_details_recursively_hide_path_and_trace_fields(self) -> None:
+        result = {
+            "status": "partial",
+            "job_id": "safe_job",
+            "warnings": [
+                {
+                    "code": "ASR_FAILED",
+                    "message": "转写不可用",
+                    "details": {
+                        "path": "/private/input.wav",
+                        "nested": {
+                            "model_path": "/secret/model.pt",
+                            "traceback": "private stack",
+                            "attempt": 1,
+                        },
+                    },
+                }
+            ],
+        }
+        rendered = result_to_view(result)["warnings_html"]
+        self.assertNotIn("/private/input.wav", rendered)
+        self.assertNotIn("/secret/model.pt", rendered)
+        self.assertNotIn("private stack", rendered)
+        self.assertIn("attempt", rendered)
+
     def test_playback_note_exposes_both_loudness_tracks_when_available(self) -> None:
         result = load_fixture("process_result_ok")
         result["original_levels"] = {"peak_abs": 0.5, "rms_dbfs": -20.0}

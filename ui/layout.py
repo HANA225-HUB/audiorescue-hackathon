@@ -84,6 +84,13 @@ def _run(
     force_recompute: bool,
 ) -> tuple[Any, ...]:
     if use_fixture:
+        if not _fixture_mode_default():
+            return result_to_ui_tuple(
+                failed_result(
+                    "正式模式禁止使用前端 fixture；如需开发联调，请在独立进程显式启用。",
+                    "INPUT_INVALID",
+                )
+            )
         return _run_fixture(fixture_name)
     return _run_real_pipeline(input_file, strength_label, reference_text, force_recompute)
 
@@ -97,9 +104,9 @@ def build_demo():
             "页面启动前请安装 requirements.txt。"
         ) from exc
 
-    fixture_names = list_fixture_names()
-    default_fixture = _first_fixture()
-    fixture_default = _fixture_mode_default()
+    fixture_enabled = _fixture_mode_default()
+    fixture_names = list_fixture_names() if fixture_enabled else []
+    default_fixture = _first_fixture() if fixture_enabled else ""
 
     with gr.Blocks(css=_read_css(), title="听清又听懂·智能音频急救台") as demo:
         gr.Markdown(
@@ -109,17 +116,26 @@ def build_demo():
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=5):
-                use_fixture = gr.Checkbox(
-                    value=fixture_default,
-                    label="开发专用：使用前端 fixture 假数据",
-                )
-                fixture = gr.Dropdown(
-                    choices=fixture_names,
-                    value=default_fixture,
-                    label="ProcessResult fixture",
-                    interactive=True,
-                )
-                gr.Markdown("开发联调样例仅验证链路，不作为比赛效果证据。正式样例等待 C 的 `configs/demo.yaml`。")
+                if fixture_enabled:
+                    use_fixture = gr.Checkbox(
+                        value=True,
+                        label="开发专用：使用前端 fixture 假数据",
+                    )
+                    fixture = gr.Dropdown(
+                        choices=fixture_names,
+                        value=default_fixture,
+                        label="ProcessResult fixture",
+                        interactive=True,
+                    )
+                    gr.Markdown(
+                        "开发联调样例仅验证链路，不作为比赛效果证据。"
+                        "正式演示请重新以默认环境启动。"
+                    )
+                else:
+                    # Keep the callback signature stable without exposing a
+                    # production-page switch capable of fabricating results.
+                    use_fixture = gr.State(False)
+                    fixture = gr.State("")
                 input_file = gr.Audio(label="上传音频", type="filepath")
             with gr.Column(scale=4):
                 strength = gr.Radio(
@@ -191,7 +207,7 @@ def build_demo():
             outputs=outputs,
         )
 
-        if default_fixture and fixture_default:
+        if default_fixture and fixture_enabled:
             demo.load(_run_fixture, inputs=[fixture], outputs=outputs)
 
     return demo

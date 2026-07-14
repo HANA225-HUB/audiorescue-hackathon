@@ -43,12 +43,16 @@ NOISE_ASSIGNMENT = {
     ("C", "s02"): "fan",
     ("C", "s03"): "keyboard",
 }
-REAL_ASSIGNMENT = {"A": ("s01", "fan"), "B": ("s02", "keyboard"), "C": ("s03", "traffic")}
+REAL_ASSIGNMENT = {
+    "A": ("s03", "traffic"),
+    "B": ("s01", "fan"),
+    "C": ("s02", "keyboard"),
+}
 DEMO_SAMPLE_IDS = {
     "mix_spkB_s03_fan_snr000",
     "mix_spkC_s03_keyboard_snrm05",
     "clean_spkA_s03",
-    "real_spkC_traffic_r01",
+    "real_spkA_traffic_r01",
 }
 
 MANIFEST_FIELDS = (

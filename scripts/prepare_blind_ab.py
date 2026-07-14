@@ -10,16 +10,15 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import os
 import random
+import secrets
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
-
-DEFAULT_SEED = 20_260_714
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +130,7 @@ def prepare_blind_test(
     output_root: str | Path,
     *,
     raters: tuple[str, ...] = ("A", "B", "C"),
-    seed: int = DEFAULT_SEED,
+    seed: int | None = None,
 ) -> BlindTestReport:
     """Create balanced private ballots without altering either audio track."""
 
@@ -160,7 +159,11 @@ def prepare_blind_test(
 
         answer_rows: list[dict[str, str]] = []
         ballot_rows: dict[str, list[dict[str, str]]] = {rater: [] for rater in raters}
-        rng = random.Random(seed)
+        # Production callers get an unpredictable assignment.  A deterministic
+        # seed remains available only when tests or an administrator explicitly
+        # request one; it is never copied into any rater package.
+        session_seed = secrets.randbits(128) if seed is None else seed
+        rng = random.Random(session_seed)
         rater_cycle = list(raters)
         rng.shuffle(rater_cycle)
         cycle_index = {rater: index for index, rater in enumerate(rater_cycle)}
@@ -224,6 +227,20 @@ def prepare_blind_test(
             ],
             answer_rows,
         )
+        (admin / "session.json").write_text(
+            json.dumps(
+                {
+                    "assignment_seed": session_seed,
+                    "pair_count": len(pairs),
+                    "raters": list(raters),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         for rater, rows in ballot_rows.items():
             _write_csv(
                 temporary / f"rater_{rater}" / "ballot.csv",
@@ -269,7 +286,15 @@ def _parser() -> argparse.ArgumentParser:
         default="A,B,C",
         help="Comma-separated unique rater IDs (default: A,B,C).",
     )
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Explicit deterministic assignment seed for tests/reproduction only; "
+            "the production default is cryptographically random."
+        ),
+    )
     return parser
 
 

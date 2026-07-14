@@ -71,6 +71,9 @@ def load_asr(model_name: str, device: str):
 def transcribe_audio(
     audio_path: str,
     language: str = "zh",
+    *,
+    model_name: str = "base",
+    device: str = "auto",
 ) -> TranscriptResult:
     ...
 ```
@@ -238,13 +241,9 @@ device
 tests/fixtures/dev_smoke_s01_fan.wav
 ```
 
-它是 S01 的合成中文语音加可重复风扇状噪声，只用于验证解码、增强、双路 ASR、路径和错误处理；不是团队真实数据，不进入比赛指标。
+它是纯数学啁啾信号加固定种子的风扇状噪声，不含人声，只用于验证解码、增强、输出路径和错误处理；不能作为 Whisper 文本或 CER 证据。双路 ASR 首次联调改用 `data_local` 内已授权的 S01/S02 中文录音，真实录音不得提交 GitHub。
 
-参考文本：
-
-```text
-今天下午三点，我们在实验室讨论语音处理项目的最终方案。
-```
+该公开 fixture 没有参考文本。
 
 正式 dev 样例生成后固定为：
 

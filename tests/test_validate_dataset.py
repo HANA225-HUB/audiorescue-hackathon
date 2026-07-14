@@ -150,7 +150,7 @@ class DatasetMatrixTest(unittest.TestCase):
             Path("controlled/locked_test/mix_spkB_s03_fan_snr000.wav"),
             artifacts,
         )
-        self.assertIn(Path("raw/real/real_spkC_traffic_r01.wav"), artifacts)
+        self.assertIn(Path("raw/real/real_spkA_traffic_r01.wav"), artifacts)
         self.assertEqual(len(required_manifest_primary_paths()), 33)
 
 
@@ -360,9 +360,9 @@ class ManifestSemanticContractTest(unittest.TestCase):
             ),
             (
                 "real extra clean path",
-                "real_spkA_fan_r01",
+                "real_spkA_traffic_r01",
                 "clean_path",
-                "raw/clean/spkA/clean_spkA_s01.wav",
+                "raw/clean/spkA/clean_spkA_s03.wav",
                 "MANIFEST_PATH_SEMANTICS",
             ),
             (
