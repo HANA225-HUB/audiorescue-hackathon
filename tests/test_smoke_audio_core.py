@@ -11,6 +11,7 @@ from unittest import mock
 import numpy as np
 
 from core.schemas import AudioMeta, TranscriptResult
+from core.schemas import EnhancementError
 from scripts import smoke_audio_core as smoke
 
 
@@ -180,6 +181,22 @@ class SmokeAudioCoreTest(unittest.TestCase):
             self.assertNotIn("model_fingerprints", payload["runs"][0])
             enhance_mock.assert_not_called()
             transcribe_mock.assert_not_called()
+
+    def test_error_evidence_sanitizes_path_like_details(self) -> None:
+        error = EnhancementError(
+            "failed",
+            details={
+                "cache_path": "C:/private/cache/model.bin",
+                "checkpoint_dir": "C:/private/checkpoints",
+                "exception_type": "ModuleNotFoundError",
+            },
+        )
+
+        evidence = smoke._audio_rescue_error_evidence(error)
+
+        self.assertEqual(evidence["details"]["cache_path"], "model.bin")
+        self.assertEqual(evidence["details"]["checkpoint_dir"], "checkpoints")
+        self.assertEqual(evidence["details"]["exception_type"], "ModuleNotFoundError")
 
 
 if __name__ == "__main__":

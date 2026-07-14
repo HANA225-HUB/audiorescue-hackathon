@@ -16,6 +16,7 @@ import shutil
 import sys
 import time
 import wave
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
