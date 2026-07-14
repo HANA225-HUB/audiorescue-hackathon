@@ -1,0 +1,42 @@
+{
+  "job_id": "fixture_input_error",
+  "status": "failed",
+  "runtime": {
+    "decode_seconds": 0.0,
+    "enhancer_load_seconds": 0.0,
+    "enhancement_seconds": 0.0,
+    "asr_load_seconds": 0.0,
+    "asr_before_seconds": 0.0,
+    "asr_after_seconds": 0.0,
+    "visualization_seconds": 0.0,
+    "event_seconds": 0.0,
+    "persistence_seconds": 0.0,
+    "total_seconds": 0.0,
+    "cache_hit": false,
+    "cold_start": false,
+    "device": "cpu"
+  },
+  "input_meta": null,
+  "original_audio_path": null,
+  "enhanced_audio_path": null,
+  "full_output_path": null,
+  "mixed_output_path": null,
+  "transcript_before": null,
+  "transcript_after": null,
+  "cer_before": null,
+  "cer_after": null,
+  "text_diff_html": null,
+  "waveform_path": null,
+  "spectrogram_path": null,
+  "events": [],
+  "warnings": [
+    {
+      "code": "INPUT_INVALID",
+      "message": "输入文件无法解码，请换用 WAV 或 MP3。",
+      "module": "audio_io",
+      "recoverable": true,
+      "details": {}
+    }
+  ],
+  "config_snapshot": {}
+}

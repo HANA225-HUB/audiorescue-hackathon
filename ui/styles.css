@@ -1,0 +1,95 @@
+:root {
+  --ar-ink: #18202f;
+  --ar-muted: #5f6878;
+  --ar-line: #d8deea;
+  --ar-panel: #f7f8fb;
+  --ar-blue: #1769aa;
+  --ar-green: #287a4b;
+  --ar-red: #a63a3a;
+  --ar-yellow: #8a6400;
+}
+
+.gradio-container {
+  max-width: 1180px !important;
+  color: var(--ar-ink);
+}
+
+button.primary {
+  min-height: 44px;
+  font-weight: 700;
+}
+
+.diff {
+  border: 1px solid var(--ar-line);
+  background: #fff;
+  padding: 12px;
+  line-height: 1.8;
+  border-radius: 6px;
+}
+
+.diff ins {
+  background: #e8f6ee;
+  color: var(--ar-green);
+  text-decoration: underline;
+  padding: 0 2px;
+}
+
+.diff del {
+  background: #fdecec;
+  color: var(--ar-red);
+  text-decoration: line-through;
+  padding: 0 2px;
+}
+
+.diff .replace {
+  background: #fff4cf;
+  color: var(--ar-yellow);
+  border-bottom: 2px solid currentColor;
+  padding: 0 2px;
+}
+
+.diff-warning,
+.empty-state {
+  border: 1px solid var(--ar-line);
+  background: var(--ar-panel);
+  border-radius: 6px;
+  color: var(--ar-muted);
+  padding: 10px 12px;
+}
+
+.warning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.warning-item {
+  border-left: 4px solid var(--ar-yellow);
+  background: #fff9e8;
+  padding: 10px 12px;
+  border-radius: 4px;
+}
+
+.warning-item strong,
+.warning-item span,
+.warning-item em {
+  display: block;
+}
+
+.warning-item strong {
+  color: var(--ar-yellow);
+}
+
+.warning-item em {
+  color: var(--ar-muted);
+  font-size: 0.9em;
+  font-style: normal;
+  margin-top: 4px;
+}
+
+.warning-item details {
+  margin-top: 8px;
+}
+
+.warning-item pre {
+  white-space: pre-wrap;
+}
