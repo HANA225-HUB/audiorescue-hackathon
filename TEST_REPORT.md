@@ -18,6 +18,7 @@
 | 时间 | 环境/提交 | 命令 | 结果 |
 |---|---|---|---|
 | 2026-07-14 | C 本地 macOS / Python 3.13.3 / `codex/c-integration` | `python3 -m unittest discover -s tests -v` | 64/64 通过；使用假后端，不等于真实模型验收 |
+| 2026-07-14 | RTX 4090 / Ubuntu 22.04 / Python 3.10.8 / `1b05abb` | `python -m unittest discover -s tests -q` | 64/64 通过，工作树干净；使用假后端，不等于真实端到端验收 |
 
 ## 4090 环境验收
 
