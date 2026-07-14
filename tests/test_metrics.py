@@ -13,6 +13,12 @@ class NormalizeZhTextTest(unittest.TestCase):
         text = "中文・かな・カナ・한글 2026"
         self.assertEqual(normalize_zh_text(text), "中文かなカナ한글2026")
 
+    def test_traditional_and_simplified_chinese_share_one_cer_form(self) -> None:
+        traditional = "請記錄會議中的三個重點：數據來源、模型效果和系統穩定性。"
+        simplified = "请记录会议中的三个重点：数据来源、模型效果和系统稳定性。"
+        self.assertEqual(normalize_zh_text(traditional), normalize_zh_text(simplified))
+        self.assertEqual(compute_cer(simplified, traditional).cer, 0.0)
+
     def test_removes_symbols_emoji_and_controls(self) -> None:
         self.assertEqual(normalize_zh_text("语音¥✅🎧\u200b处理"), "语音处理")
 

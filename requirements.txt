@@ -10,3 +10,4 @@ matplotlib>=3.8,<4
 jiwer>=3,<5
 pydantic>=2,<3
 PyYAML>=6,<7
+opencc-python-reimplemented==0.1.7

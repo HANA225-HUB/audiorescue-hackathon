@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import unicodedata
 
+from opencc import OpenCC
+
 from core.schemas import CerResult
+
+
+_TRADITIONAL_TO_SIMPLIFIED = OpenCC("t2s")
 
 
 def normalize_zh_text(text: str) -> str:
@@ -17,6 +22,7 @@ def normalize_zh_text(text: str) -> str:
 
     Policy:
     - apply Unicode NFKC normalization;
+    - convert Traditional Chinese to Simplified Chinese with OpenCC ``t2s``;
     - lowercase Latin letters (and any other cased Unicode letters);
     - keep Unicode letters and numbers, including CJK, kana, and Hangul;
     - remove whitespace, punctuation, symbols, emoji, and control characters.
@@ -29,6 +35,7 @@ def normalize_zh_text(text: str) -> str:
         raise TypeError("text must be a string")
 
     normalized = unicodedata.normalize("NFKC", text).lower()
+    normalized = _TRADITIONAL_TO_SIMPLIFIED.convert(normalized)
     return "".join(character for character in normalized if character.isalnum())
 
 

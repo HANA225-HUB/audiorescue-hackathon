@@ -31,7 +31,10 @@ jobs:
           cache: pip
 
       - name: Install lightweight contract dependency
-        run: python -m pip install "PyYAML>=6,<7"
+        run: >-
+          python -m pip install
+          "PyYAML>=6,<7"
+          "opencc-python-reimplemented==0.1.7"
 
       - name: Run C contract and offline dataset tests
         run: >-
@@ -72,6 +75,7 @@ jobs:
           "soundfile==0.12.1"
           "matplotlib>=3.8,<4"
           "gradio==5.49.1"
+          "opencc-python-reimplemented==0.1.7"
 
       - name: Run the complete offline test suite
         run: python -m unittest discover -s tests -v
