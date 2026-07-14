@@ -1,5 +1,5 @@
 # Demo assets
 
-这里只提交经 C 审核、团队同意展示且授权明确的少量演示音频。完整 `data_local/`、锁定测试集、用户上传音频和模型输出不会进入 Git。
+Only reviewed, redistributable demo audio may be committed here. Full local datasets, private specs, user uploads, model outputs, run artifacts, and holdout-style evaluation material must stay outside Git.
 
-正式候选名称由数据手册确定；在配置冻结前，`locked_test` 不发给 A/B 调参。
+Use neutral names such as `demo_role_1.wav`. Do not encode real speaker names, sample IDs, reference text, collection location, or local paths in filenames.

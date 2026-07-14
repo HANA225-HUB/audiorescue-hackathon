@@ -1,8 +1,8 @@
-"""Initialize the private AudioRescue-CN-Mini-v1 recording workspace.
+"""Initialize an ignored local AudioRescue dataset workspace from a spec.
 
-The generated ``data_local`` tree is intentionally ignored by Git.  This
-script only creates directories and text templates; it never creates, moves,
-renames, or overwrites audio recordings.
+The generated tree is intentionally private. This script only creates
+directories and text templates; it never creates, moves, renames, or overwrites
+audio recordings.
 """
 
 from __future__ import annotations
@@ -14,43 +14,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.dataset_spec import DatasetSpec, load_dataset_spec
 
-DATASET_VERSION = "AudioRescue-CN-Mini-v1"
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-SENTENCES = {
-    "s01": "今天下午三点，我们在实验室讨论语音处理项目的最终方案。",
-    "s02": "请记录会议中的三个重点：数据来源、模型效果和系统稳定性。",
-    "s03": "如果现场网络中断，系统仍然可以在本地完成音频增强和文字转写。",
-}
-
-LATIN_SQUARE = {
-    "A": {"s01": "fan", "s02": "keyboard", "s03": "traffic"},
-    "B": {"s01": "keyboard", "s02": "traffic", "s03": "fan"},
-    "C": {"s01": "traffic", "s02": "fan", "s03": "keyboard"},
-}
-
-REAL_RECORDINGS = (
-    ("A", "s03", "traffic"),
-    ("B", "s01", "fan"),
-    ("C", "s02", "keyboard"),
-)
-
-DIRECTORIES = (
-    "source_original/clean/spkA",
-    "source_original/clean/spkB",
-    "source_original/clean/spkC",
-    "source_original/noise",
-    "source_original/real",
-    "raw/clean/spkA",
-    "raw/clean/spkB",
-    "raw/clean/spkC",
-    "raw/noise",
-    "raw/real",
-    "controlled/dev",
-    "controlled/locked_test",
-    "outputs",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,40 +44,38 @@ def _render_csv(rows: list[dict[str, str]], fieldnames: list[str]) -> str:
     return output.getvalue()
 
 
-def _transcript_rows() -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for speaker in ("A", "B", "C"):
-        for sentence_id, reference_text in SENTENCES.items():
-            noise_type = LATIN_SQUARE[speaker][sentence_id]
-            rows.append(
-                {
-                    "speaker_id": speaker,
-                    "sentence_id": sentence_id.upper(),
-                    "split": "dev" if sentence_id in {"s01", "s02"} else "locked_test",
-                    "noise_type": noise_type,
-                    "clean_path": (
-                        f"raw/clean/spk{speaker}/"
-                        f"clean_spk{speaker}_{sentence_id}.wav"
-                    ),
-                    "reference_text": reference_text,
-                }
-            )
-    return rows
+def _directories(spec: DatasetSpec) -> tuple[str, ...]:
+    paths = {Path("outputs"), Path("source_original/clean"), Path("source_original/noise"), Path("source_original/real")}
+    for path in spec.required_audio_paths():
+        paths.add(path.parent)
+    return tuple(path.as_posix() for path in sorted(paths, key=lambda item: item.as_posix()))
 
 
-def _metadata_rows() -> list[dict[str, str]]:
+def _transcript_rows(spec: DatasetSpec) -> list[dict[str, str]]:
+    return [
+        {
+            "clean_id": item.id,
+            "speaker_id": item.speaker_id,
+            "sentence_id": item.sentence_id,
+            "split": item.split,
+            "clean_path": item.path.as_posix(),
+            "reference_text": item.reference_text,
+        }
+        for item in spec.clean_recordings
+    ]
+
+
+def _metadata_rows(spec: DatasetSpec) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for item in _transcript_rows():
-        speaker = item["speaker_id"]
-        sentence = item["sentence_id"].lower()
+    for item in spec.clean_recordings:
         rows.append(
             {
-                "asset_id": f"clean_spk{speaker}_{sentence}",
+                "asset_id": item.id,
                 "source_type": "clean",
                 "source_original_path": "",
-                "relative_path": item["clean_path"],
-                "speaker_id": speaker,
-                "sentence_id": item["sentence_id"],
+                "relative_path": item.path.as_posix(),
+                "speaker_id": item.speaker_id,
+                "sentence_id": item.sentence_id,
                 "noise_type": "",
                 "recording_device": "TODO",
                 "recording_location": "TODO",
@@ -123,17 +88,16 @@ def _metadata_rows() -> list[dict[str, str]]:
                 "notes": "",
             }
         )
-
-    for noise in ("fan", "keyboard", "traffic"):
+    for item in spec.noise_recordings:
         rows.append(
             {
-                "asset_id": f"noise_{noise}_take01",
+                "asset_id": item.id,
                 "source_type": "noise",
                 "source_original_path": "",
-                "relative_path": f"raw/noise/noise_{noise}_take01.wav",
+                "relative_path": item.path.as_posix(),
                 "speaker_id": "",
                 "sentence_id": "",
-                "noise_type": noise,
+                "noise_type": item.noise_type,
                 "recording_device": "TODO",
                 "recording_location": "TODO",
                 "recording_date": "TODO",
@@ -145,17 +109,16 @@ def _metadata_rows() -> list[dict[str, str]]:
                 "notes": "Avoid identifiable private speech.",
             }
         )
-
-    for speaker, sentence, noise in REAL_RECORDINGS:
+    for item in spec.real_recordings:
         rows.append(
             {
-                "asset_id": f"real_spk{speaker}_{noise}_r01",
+                "asset_id": item.sample_id,
                 "source_type": "real",
                 "source_original_path": "",
-                "relative_path": f"raw/real/real_spk{speaker}_{noise}_r01.wav",
-                "speaker_id": speaker,
-                "sentence_id": sentence.upper(),
-                "noise_type": noise,
+                "relative_path": item.path.as_posix(),
+                "speaker_id": item.speaker_id,
+                "sentence_id": item.sentence_id,
+                "noise_type": item.noise_type,
                 "recording_device": "TODO",
                 "recording_location": "TODO",
                 "recording_date": "TODO",
@@ -170,55 +133,34 @@ def _metadata_rows() -> list[dict[str, str]]:
     return rows
 
 
-def _readme_text() -> str:
-    return f"""# {DATASET_VERSION} 本地工作区
+def _readme_text(spec: DatasetSpec) -> str:
+    return f"""# Local AudioRescue Dataset Workspace
 
-该目录不会提交到 Git。录音设备产生的 M4A/AAC/WAV 母带先放入 `source_original/`，从此只读，不裁剪、不改名、不覆盖。只将从母带导出的最终标准化 WAV 放入 `raw/` 的固定路径。
+This directory is private and must stay ignored by Git. It is initialized from a local dataset spec and contains placeholders only.
 
-## 录音落盘清单
+Dataset version: `{spec.dataset_version}`
 
-- 不可变母带：`source_original/clean/spkA..C/`、`source_original/noise/`、`source_original/real/`
-- 9 条 clean：`raw/clean/spkA..C/clean_spkX_s01..s03.wav`
-- 3 条 noise：`raw/noise/noise_fan|keyboard|traffic_take01.wav`
-- 3 条 real：`raw/real/real_spkA_traffic_r01.wav`、`real_spkB_fan_r01.wav`、`real_spkC_keyboard_r01.wav`
+Workflow:
+- Put immutable source recordings under `source_original/`.
+- Put standardized 48 kHz mono PCM16 WAV files under the relative paths declared by the spec.
+- Fill `recording_metadata.csv` with source and standardized SHA-256 values before using the formal approval token.
+- Generate `manifest.csv` with `scripts/build_dataset.py --spec <local-spec>`.
+- Keep holdout-style splits isolated until the agreed one-shot evaluation point.
 
-进入混音前，最终 WAV 必须是 48kHz、单声道、PCM16。clean 开头和结尾各保留约 0.5 秒；noise 为 45–60 秒且不得包含可辨认的未授权谈话。
-
-## 文本台账
-
-- `transcripts.tsv`：固定参考文本、切分和拉丁方噪声分配；不得用转写结果反向修改。
-- `recording_metadata.csv`：录音设备、地点、日期、录制人、授权状态，以及原始母带/标准化 WAV 的两个 SHA-256。
-- `LICENSES.md`：三位说话人必须确认展示/提交范围。
-- `manifest.csv`：由固定混音工具生成，不要手工编写混音参数。
-
-`locked_test` 在配置冻结前不用于调整模型、强度或参数。
+No audio files were generated by this initializer.
 """
 
 
-def _licenses_text() -> str:
-    return f"""# {DATASET_VERSION} 数据授权记录
+def _licenses_text(spec: DatasetSpec) -> str:
+    return f"""# Dataset Authorization Record
 
-> 未将下表的 `pending` 改为明确选项前，任何对应音频都不得放入公开仓库、演示包或比赛提交包。
+Nothing in this workspace may be published, submitted, or used for evaluation until the local owner records an explicit decision.
 
-## 说话人同意记录
+Allowed manifest tokens for this spec:
+- development: `{spec.consent_tokens.pending}`
+- formal evaluation: `{spec.consent_tokens.approved}`
 
-| 说话人 | 比赛现场播放 | 评委提交包 | 公开 GitHub | 确认日期 | 确认方式 |
-|---|---|---|---|---|---|
-| A | pending | pending | pending | TODO | TODO |
-| B | pending | pending | pending | TODO | TODO |
-| C | pending | pending | pending | TODO | TODO |
-
-允许值：`yes` / `no`。三个用途分别确认，不得从“可以现场播放”推定“可以公开发布”。
-
-## 自录素材
-
-- clean speech：团队成员自录，用途范围以上表为准。
-- noise stems：团队自录；确认不含可辨认的未授权谈话或商业音乐。
-- real noisy recordings：说话人自录，用途范围以上表为准。
-
-## 外部数据
-
-当前正式主数据不包含外部素材。如后续引入 VoiceBank-DEMAND 或 ESC-50，必须在此增加来源链接、数据版本、具体文件和原许可条款，不能只写“公开数据集”。
+Record consent per source in `recording_metadata.csv`; do not infer public release rights from local playback permission.
 """
 
 
@@ -242,9 +184,14 @@ def _require_private_root(dataset_root: Path) -> None:
         )
 
 
-def initialize_dataset(root: str | Path) -> InitReport:
+def initialize_dataset(
+    root: str | Path,
+    *,
+    spec_path: str | Path | None = None,
+) -> InitReport:
     """Create an idempotent private workspace without overwriting text or audio."""
 
+    spec = load_dataset_spec(spec_path)
     dataset_root = Path(root).expanduser().resolve()
     _require_private_root(dataset_root)
     created_directories: list[Path] = []
@@ -257,7 +204,7 @@ def initialize_dataset(root: str | Path) -> InitReport:
     elif not dataset_root.is_dir():
         raise NotADirectoryError(f"dataset root is not a directory: {dataset_root}")
 
-    for relative in DIRECTORIES:
+    for relative in _directories(spec):
         directory = dataset_root / relative
         if not directory.exists():
             directory.mkdir(parents=True)
@@ -266,20 +213,20 @@ def initialize_dataset(root: str | Path) -> InitReport:
             raise NotADirectoryError(f"expected directory but found file: {directory}")
 
     templates = {
-        dataset_root / "README.md": _readme_text(),
+        dataset_root / "README.md": _readme_text(spec),
         dataset_root / "transcripts.tsv": _render_tsv(
-            _transcript_rows(),
+            _transcript_rows(spec),
             [
+                "clean_id",
                 "speaker_id",
                 "sentence_id",
                 "split",
-                "noise_type",
                 "clean_path",
                 "reference_text",
             ],
         ),
         dataset_root / "recording_metadata.csv": _render_csv(
-            _metadata_rows(),
+            _metadata_rows(spec),
             [
                 "asset_id",
                 "source_type",
@@ -299,7 +246,7 @@ def initialize_dataset(root: str | Path) -> InitReport:
                 "notes",
             ],
         ),
-        dataset_root / "LICENSES.md": _licenses_text(),
+        dataset_root / "LICENSES.md": _licenses_text(spec),
     }
     for path, content in templates.items():
         if path.exists():
@@ -318,19 +265,16 @@ def initialize_dataset(root: str | Path) -> InitReport:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Initialize the ignored AudioRescue-CN-Mini-v1 workspace."
+        description="Initialize an ignored AudioRescue dataset workspace."
     )
-    parser.add_argument(
-        "--root",
-        default="data_local",
-        help="Private dataset directory (default: data_local).",
-    )
+    parser.add_argument("--root", default="data_local")
+    parser.add_argument("--spec", default=None, help="Local dataset spec JSON")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
-    report = initialize_dataset(args.root)
+    report = initialize_dataset(args.root, spec_path=args.spec)
     print(f"Dataset workspace: {report.root}")
     print(f"Created directories: {len(report.created_directories)}")
     print(f"Created templates: {len(report.created_files)}")
