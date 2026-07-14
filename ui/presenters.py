@@ -24,6 +24,12 @@ STATUS_LABELS = {
     "failed": "急救未完成",
 }
 
+STATUS_CLASSES = {
+    "success": "ar-status-success",
+    "partial": "ar-status-partial",
+    "failed": "ar-status-failed",
+}
+
 STRENGTH_LABELS = {
     "轻度": 0.50,
     "标准": 0.75,
@@ -242,9 +248,10 @@ def input_markdown(result: dict[str, Any]) -> str:
 
 
 def status_markdown(result: dict[str, Any]) -> str:
-    status = str(result.get("status") or "failed")
-    label = STATUS_LABELS.get(status, "未知状态")
-    cache_badge = " | 本地缓存" if is_cache_result(result) else ""
+    raw_status = str(result.get("status") or "failed")
+    status = raw_status if raw_status in STATUS_LABELS else "failed"
+    label = STATUS_LABELS.get(raw_status, "未知状态")
+    cache_badge = "<span class='ar-cache-badge'>本地缓存</span>" if is_cache_result(result) else ""
     runtime = as_dict(result.get("runtime"))
     config = as_dict(result.get("config_snapshot"))
     request = as_dict(config.get("request"))
@@ -257,17 +264,34 @@ def status_markdown(result: dict[str, Any]) -> str:
     asr_model = config.get("asr_model") or asr.get("model") or "未记录"
     sample_notice = config.get("sample_notice")
 
-    lines = [
-        f"## {label}{cache_badge}",
-        "",
-        f"- 任务：`{result.get('job_id') or '未记录'}`",
-        f"- 总耗时：{format_seconds(runtime.get('total_seconds'))}",
-        f"- 增强强度：`{strength}`",
-        f"- Whisper：`{asr_model}`",
+    facts = [
+        ("任务", result.get("job_id") or "未记录"),
+        ("总耗时", format_seconds(runtime.get("total_seconds"))),
+        ("增强强度", strength),
+        ("Whisper", asr_model),
     ]
     if sample_notice:
-        lines.append(f"- 样例说明：{sample_notice}")
-    return "\n".join(lines)
+        facts.append(("样例说明", sample_notice))
+
+    class_name = STATUS_CLASSES[status]
+    parts = [
+        (
+            f"<section class='ar-status-card {class_name}' "
+            f"data-status='{html.escape(status)}' aria-label='处理状态 {html.escape(status)}'>"
+        ),
+        "<div class='ar-status-header'>",
+        f"<span class='ar-status-machine'>状态：{html.escape(status)}</span>",
+        f"<h2>{html.escape(label)}</h2>",
+        cache_badge,
+        "</div>",
+        "<dl class='ar-status-facts'>",
+    ]
+    for key, value in facts:
+        parts.append(
+            f"<div><dt>{html.escape(str(key))}</dt><dd>{html.escape(str(value))}</dd></div>"
+        )
+    parts.extend(["</dl>", "</section>"])
+    return "".join(parts)
 
 
 def playback_note_markdown(result: dict[str, Any]) -> str:

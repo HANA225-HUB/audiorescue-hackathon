@@ -164,7 +164,7 @@ def build_demo():
         )
 
         with gr.Row(equal_height=True, elem_classes=["ar-result-grid"]):
-            status = gr.Markdown(elem_classes=["ar-panel", "ar-status-panel"])
+            status = gr.HTML(elem_classes=["ar-panel", "ar-status-panel"])
             input_info = gr.Markdown(elem_classes=["ar-panel", "ar-meta-panel"])
 
         playback_note = gr.Markdown(elem_classes=["ar-panel", "ar-playback-note"])

@@ -30,7 +30,26 @@ class PresenterTests(unittest.TestCase):
         view = result_to_view(result)
         self.assertEqual(result["status"], "success")
         self.assertIn("本地缓存", view["status_md"])
+        self.assertIn("data-status='success'", view["status_md"])
         self.assertIn("缓存命中：`是`", view["runtime_md"])
+
+    def test_status_markup_has_semantic_state_classes(self) -> None:
+        cases = {
+            "process_result_ok": ("success", "ar-status-success", "急救完成"),
+            "process_result_partial_asr": (
+                "partial",
+                "ar-status-partial",
+                "部分结果不可用",
+            ),
+            "process_result_failed_enhance": ("failed", "ar-status-failed", "急救未完成"),
+        }
+        for fixture_name, (status, class_name, title) in cases.items():
+            with self.subTest(status=status):
+                rendered = result_to_view(load_fixture(fixture_name))["status_md"]
+                self.assertIn(f"data-status='{status}'", rendered)
+                self.assertIn(class_name, rendered)
+                self.assertIn(f"状态：{status}", rendered)
+                self.assertIn(title, rendered)
 
     def test_partial_asr_keeps_available_results(self) -> None:
         result = load_fixture("process_result_partial_asr")
@@ -107,8 +126,8 @@ class PresenterTests(unittest.TestCase):
             "pipeline_version": "pipeline-v0.1.0",
         }
         view = result_to_view(result)
-        self.assertIn("增强强度：`0.5`", view["status_md"])
-        self.assertIn("Whisper：`base`", view["status_md"])
+        self.assertIn("<dt>增强强度</dt><dd>0.5</dd>", view["status_md"])
+        self.assertIn("<dt>Whisper</dt><dd>base</dd>", view["status_md"])
 
     def test_txt_and_json_downloads_are_placeholders_until_pipeline_contracts_paths(self) -> None:
         result = load_fixture("process_result_ok")
