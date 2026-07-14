@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -22,6 +23,9 @@ from core.schemas import (
 
 MAX_DURATION_SECONDS = 60.0
 MIN_DURATION_SECONDS = 1.0
+MAX_INPUT_BYTES = 128 * 1024 * 1024
+FFPROBE_TIMEOUT_SECONDS = 15.0
+FFMPEG_TIMEOUT_SECONDS = 120.0
 CLIP_THRESHOLD = 0.99
 SILENCE_THRESHOLD = 1e-4
 NEAR_SILENT_RMS_DBFS = -50.0
@@ -39,32 +43,24 @@ def normalize_audio(
     target = Path(output_path)
     if not source.exists() or not source.is_file():
         raise InputAudioError("输入音频不存在或不是文件", details={"path": str(source)})
-    if source.stat().st_size == 0:
-        raise InputAudioError("输入音频为空文件", details={"path": str(source)})
+    _validate_input_size(source)
 
     source_format = source.suffix.lower().lstrip(".") or None
     if source_format == "wav":
+        header_duration = _wav_header_duration(source)
+        _validate_duration(header_duration, source)
         samples, sample_rate, channels = _read_wav(source)
         original_sample_rate = sample_rate
         original_channels = channels
     else:
+        probed_duration = _probe_non_wav(source)
+        _validate_duration(probed_duration, source)
         samples, sample_rate, channels = _decode_with_ffmpeg(source, target_sr, mono)
         original_sample_rate = None
         original_channels = None
 
     duration_seconds = _duration_seconds(samples, sample_rate)
-    if duration_seconds <= 0:
-        raise InputAudioError("输入音频时长为 0，无法处理")
-    if duration_seconds < MIN_DURATION_SECONDS:
-        raise InputAudioError(
-            "输入音频短于 1 秒，无法稳定处理",
-            details={"duration_seconds": duration_seconds},
-        )
-    if duration_seconds > MAX_DURATION_SECONDS:
-        raise InputTooLongError(
-            "输入音频超过 60 秒，请裁剪后重试",
-            details={"duration_seconds": duration_seconds},
-        )
+    _validate_duration(duration_seconds, source)
 
     normalized = np.asarray(samples, dtype=np.float32)
     if mono and normalized.ndim == 2:
@@ -176,6 +172,7 @@ def _decode_with_ffmpeg(source: Path, target_sr: int, mono: bool) -> tuple[np.nd
         decoded = Path(temp_dir) / "decoded.wav"
         command = [
             ffmpeg,
+            "-nostdin",
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -190,14 +187,226 @@ def _decode_with_ffmpeg(source: Path, target_sr: int, mono: bool) -> tuple[np.nd
         if mono:
             command.extend(["-ac", "1"])
         command.append(str(decoded))
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise InputAudioError(
+                "输入音频解码超时",
+                details={
+                    "path": str(source),
+                    "timeout_seconds": FFMPEG_TIMEOUT_SECONDS,
+                },
+            ) from exc
+        except OSError as exc:
+            raise InputAudioError(
+                "无法启动 ffmpeg 解码输入音频",
+                detail=str(exc),
+                details={"path": str(source)},
+            ) from exc
         if completed.returncode != 0:
             raise InputAudioError(
                 "输入音频无法解码",
-                detail=completed.stderr.strip() or None,
+                detail=_bounded_detail(completed.stderr),
                 details={"path": str(source)},
             )
         return _read_wav(decoded)
+
+
+def _validate_input_size(source: Path) -> None:
+    try:
+        size_bytes = source.stat().st_size
+    except OSError as exc:
+        raise InputAudioError(
+            "无法读取输入音频文件信息",
+            detail=str(exc),
+            details={"path": str(source)},
+        ) from exc
+    if size_bytes == 0:
+        raise InputAudioError("输入音频为空文件", details={"path": str(source)})
+    if size_bytes > MAX_INPUT_BYTES:
+        raise InputAudioError(
+            "输入音频文件过大",
+            details={
+                "path": str(source),
+                "size_bytes": size_bytes,
+                "max_size_bytes": MAX_INPUT_BYTES,
+            },
+        )
+
+
+def _validate_duration(duration_seconds: float, source: Path) -> None:
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise InputAudioError(
+            "输入音频时长无效，无法处理",
+            details={"path": str(source), "duration_seconds": duration_seconds},
+        )
+    if duration_seconds < MIN_DURATION_SECONDS:
+        raise InputAudioError(
+            "输入音频短于 1 秒，无法稳定处理",
+            details={"path": str(source), "duration_seconds": duration_seconds},
+        )
+    if duration_seconds > MAX_DURATION_SECONDS:
+        raise InputTooLongError(
+            "输入音频超过 60 秒，请裁剪后重试",
+            details={"path": str(source), "duration_seconds": duration_seconds},
+        )
+
+
+def _wav_header_duration(source: Path) -> float:
+    """Read only the WAV header so oversized audio is rejected before allocation."""
+
+    try:
+        with wave.open(str(source), "rb") as handle:
+            if handle.getcomptype() != "NONE":
+                raise InputAudioError(
+                    "暂不支持压缩 WAV 输入", details={"path": str(source)}
+                )
+            sample_rate = handle.getframerate()
+            channels = handle.getnchannels()
+            frame_count = handle.getnframes()
+    except InputAudioError:
+        raise
+    except (EOFError, OSError, wave.Error) as exc:
+        raise InputAudioError(
+            "输入 WAV 头无法读取",
+            detail=str(exc),
+            details={"path": str(source)},
+        ) from exc
+
+    if sample_rate <= 0 or channels <= 0 or frame_count <= 0:
+        raise InputAudioError(
+            "输入 WAV 头包含无效参数",
+            details={
+                "path": str(source),
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "frames": frame_count,
+            },
+        )
+    return float(frame_count / sample_rate)
+
+
+def _probe_non_wav(source: Path) -> float:
+    """Probe duration before decoding a non-WAV upload."""
+
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        raise InputAudioError(
+            "当前环境缺少 ffprobe，无法安全预检非 WAV 输入",
+            details={"path": str(source), "source_format": source.suffix.lower()},
+        )
+    command = [
+        ffprobe,
+        "-nostdin",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "format=duration,size:stream=duration",
+        "-of",
+        "json",
+        str(source),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise InputAudioError(
+            "输入音频预检超时",
+            details={
+                "path": str(source),
+                "timeout_seconds": FFPROBE_TIMEOUT_SECONDS,
+            },
+        ) from exc
+    except OSError as exc:
+        raise InputAudioError(
+            "无法启动 ffprobe 预检输入音频",
+            detail=str(exc),
+            details={"path": str(source)},
+        ) from exc
+
+    if completed.returncode != 0:
+        raise InputAudioError(
+            "输入音频无法读取或不包含音频流",
+            detail=_bounded_detail(completed.stderr),
+            details={"path": str(source)},
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise InputAudioError(
+            "ffprobe 未返回可用的音频元数据",
+            detail=str(exc),
+            details={"path": str(source)},
+        ) from exc
+
+    durations: list[float] = []
+    format_payload = payload.get("format", {}) if isinstance(payload, dict) else {}
+    streams_payload = payload.get("streams", []) if isinstance(payload, dict) else []
+    if not isinstance(streams_payload, list) or not any(
+        isinstance(stream, dict) for stream in streams_payload
+    ):
+        raise InputAudioError(
+            "输入文件不包含可用的音频流",
+            details={"path": str(source)},
+        )
+    if isinstance(format_payload, dict):
+        _append_duration(durations, format_payload.get("duration"))
+        reported_size = _positive_finite_number(format_payload.get("size"))
+        if reported_size is not None and reported_size > MAX_INPUT_BYTES:
+            raise InputAudioError(
+                "输入音频文件过大",
+                details={
+                    "path": str(source),
+                    "probed_size_bytes": int(reported_size),
+                    "max_size_bytes": MAX_INPUT_BYTES,
+                },
+            )
+    if isinstance(streams_payload, list):
+        for stream in streams_payload:
+            if isinstance(stream, dict):
+                _append_duration(durations, stream.get("duration"))
+    if not durations:
+        raise InputAudioError(
+            "ffprobe 无法确定输入音频时长",
+            details={"path": str(source)},
+        )
+    return max(durations)
+
+
+def _append_duration(durations: list[float], raw_value: Any) -> None:
+    value = _positive_finite_number(raw_value)
+    if value is not None:
+        durations.append(value)
+
+
+def _positive_finite_number(raw_value: Any) -> float | None:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _bounded_detail(value: Any, limit: int = 500) -> str | None:
+    detail = str(value or "").strip()
+    if not detail:
+        return None
+    return detail[:limit]
 
 
 def _read_wav(path: str | Path) -> tuple[np.ndarray, int, int]:
@@ -219,23 +428,53 @@ def _read_wav(path: str | Path) -> tuple[np.ndarray, int, int]:
             details={"path": str(path)},
         ) from exc
 
+    if sample_rate <= 0 or channels <= 0:
+        raise InputAudioError(
+            "输入 WAV 包含无效参数",
+            details={
+                "path": str(path),
+                "sample_rate": sample_rate,
+                "channels": channels,
+            },
+        )
     if frame_count == 0 or not raw:
         raise InputAudioError("输入音频为空或没有可读帧", details={"path": str(path)})
-
-    if sample_width == 1:
-        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
-    elif sample_width == 2:
-        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    elif sample_width == 4:
-        data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
-    else:
+    expected_bytes = frame_count * channels * sample_width
+    if len(raw) != expected_bytes:
         raise InputAudioError(
-            "暂不支持该 WAV 位深",
-            details={"path": str(path), "sample_width": sample_width},
+            "输入 WAV 帧数据不完整",
+            details={
+                "path": str(path),
+                "expected_bytes": expected_bytes,
+                "actual_bytes": len(raw),
+            },
         )
 
-    if channels > 1:
-        data = data.reshape(-1, channels)
+    try:
+        if sample_width == 1:
+            data = (
+                np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0
+            ) / 128.0
+        elif sample_width == 2:
+            data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        elif sample_width == 4:
+            data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+        else:
+            raise InputAudioError(
+                "暂不支持该 WAV 位深",
+                details={"path": str(path), "sample_width": sample_width},
+            )
+
+        if channels > 1:
+            data = data.reshape(-1, channels)
+    except InputAudioError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise InputAudioError(
+            "输入 WAV 帧数据无法解码",
+            detail=str(exc),
+            details={"path": str(path)},
+        ) from exc
     return np.asarray(data, dtype=np.float32), int(sample_rate), int(channels)
 
 

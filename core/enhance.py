@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import threading
 import time
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,7 @@ from core.schemas import (
 
 _ENHANCER_BACKEND: Any | None = None
 _ENHANCER_MODEL_DIR: str | None = None
+_ENHANCER_LOCK = threading.Lock()
 
 
 class _DeepFilterNetBackend:
@@ -58,11 +62,13 @@ def load_enhancer(model_dir: str | None = None):
     """Load and memoize the DeepFilterNet backend for this process."""
 
     global _ENHANCER_BACKEND, _ENHANCER_MODEL_DIR
-    if _ENHANCER_BACKEND is not None and _ENHANCER_MODEL_DIR == model_dir:
-        return _ENHANCER_BACKEND
-    _ENHANCER_BACKEND = _DeepFilterNetBackend(model_dir)
-    _ENHANCER_MODEL_DIR = model_dir
-    return _ENHANCER_BACKEND
+    with _ENHANCER_LOCK:
+        if _ENHANCER_BACKEND is not None and _ENHANCER_MODEL_DIR == model_dir:
+            return _ENHANCER_BACKEND
+        loaded_backend = _DeepFilterNetBackend(model_dir)
+        _ENHANCER_BACKEND = loaded_backend
+        _ENHANCER_MODEL_DIR = model_dir
+        return loaded_backend
 
 
 def enhance_audio(
@@ -73,10 +79,16 @@ def enhance_audio(
 ) -> EnhancementOutput:
     """Run enhancement and create the dry/wet mixed output track."""
 
-    if not 0.0 <= float(strength) <= 1.0:
+    if isinstance(strength, bool) or not isinstance(strength, Real):
+        raise EnhancementError(
+            "增强强度必须是 0.0 到 1.0 之间的有限数字",
+            details={"strength": repr(strength)},
+        )
+    normalized_strength = float(strength)
+    if not math.isfinite(normalized_strength) or not 0.0 <= normalized_strength <= 1.0:
         raise EnhancementError(
             "增强强度必须在 0.0 到 1.0 之间",
-            details={"strength": strength},
+            details={"strength": repr(strength)},
         )
 
     input_path = Path(input_wav)
@@ -85,10 +97,10 @@ def enhance_audio(
     full_path.parent.mkdir(parents=True, exist_ok=True)
     mix_path.parent.mkdir(parents=True, exist_ok=True)
 
-    start = time.perf_counter()
     warnings: list[WarningItem] = []
     try:
         backend = load_enhancer()
+        start = time.perf_counter()
         backend.enhance_file(str(input_path), str(full_path))
         dry, dry_sr, _ = _read_wav(input_path)
         wet, wet_sr, _ = _read_wav(full_path)
@@ -97,7 +109,7 @@ def enhance_audio(
         if wet_sr != dry_sr:
             wet = _resample_linear(wet, wet_sr, dry_sr)
         wet = _match_length(wet, dry.shape[0])
-        mixed = (1.0 - float(strength)) * dry + float(strength) * wet
+        mixed = (1.0 - normalized_strength) * dry + normalized_strength * wet
         if not np.all(np.isfinite(mixed)):
             raise OutputValidationError("增强输出包含 NaN 或 Inf")
 
@@ -129,7 +141,7 @@ def enhance_audio(
     return EnhancementOutput(
         full_output_path=str(full_path.resolve()),
         mixed_output_path=str(mix_path.resolve()),
-        strength=float(strength),
+        strength=normalized_strength,
         runtime_seconds=time.perf_counter() - start,
         model_name=getattr(backend, "model_name", "DeepFilterNet3"),
         warnings=warnings,

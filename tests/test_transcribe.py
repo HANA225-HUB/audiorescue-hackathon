@@ -1,6 +1,10 @@
+import sys
 import tempfile
+import time
+import types
 import unittest
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -88,6 +92,54 @@ class TranscribeContractTest(unittest.TestCase):
             with mock.patch.object(transcribe, "load_asr", return_value=fake):
                 with self.assertRaises(ASRInferenceError):
                     transcribe.transcribe_audio(str(wav_path), language="zh")
+
+    def test_transcribe_audio_uses_explicit_non_default_model_and_device(self) -> None:
+        from core import transcribe
+
+        fake = _FakeWhisperModel({"text": "ok", "language": "zh", "segments": []})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wav_path = Path(temp_dir) / "original.wav"
+            _write_pcm16_wav(wav_path)
+            with mock.patch.object(
+                transcribe, "load_asr", return_value=fake
+            ) as loader:
+                result = transcribe.transcribe_audio(
+                    str(wav_path),
+                    language="zh",
+                    model_name="tiny",
+                    device="cpu",
+                )
+
+        loader.assert_called_once_with("tiny", "cpu")
+        self.assertEqual(result.model_name, "whisper-tiny")
+        self.assertFalse(fake.kwargs["fp16"])
+
+    def test_load_asr_singleton_is_thread_safe(self) -> None:
+        from core import transcribe
+
+        loaded_model = object()
+        load_calls: list[tuple[str, str]] = []
+
+        def fake_load_model(model_name: str, *, device: str):
+            load_calls.append((model_name, device))
+            time.sleep(0.02)
+            return loaded_model
+
+        fake_whisper = types.SimpleNamespace(load_model=fake_load_model)
+        with (
+            mock.patch.object(transcribe, "_ASR_MODEL", None),
+            mock.patch.object(transcribe, "_ASR_KEY", None),
+            mock.patch.dict(sys.modules, {"whisper": fake_whisper}),
+        ):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                models = list(
+                    executor.map(
+                        lambda _: transcribe.load_asr("tiny", "cpu"), range(8)
+                    )
+                )
+
+        self.assertEqual(load_calls, [("tiny", "cpu")])
+        self.assertTrue(all(model is loaded_model for model in models))
 
 
 if __name__ == "__main__":

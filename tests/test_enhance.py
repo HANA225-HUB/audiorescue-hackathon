@@ -1,6 +1,8 @@
 import tempfile
+import time
 import unittest
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -67,19 +69,31 @@ class EnhancementContractTest(unittest.TestCase):
             self.assertAlmostEqual(float(np.mean(mixed)), 0.65, places=3)
 
     def test_enhance_audio_rejects_invalid_strength(self) -> None:
-        from core.enhance import enhance_audio
+        from core import enhance
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             input_wav = temp / "original.wav"
             _write_pcm16_wav(input_wav, np.zeros(48_000, dtype=np.float32))
-            with self.assertRaises(EnhancementError):
-                enhance_audio(
-                    str(input_wav),
-                    str(temp / "full.wav"),
-                    str(temp / "mix.wav"),
-                    strength=1.5,
-                )
+            with mock.patch.object(enhance, "load_enhancer") as loader:
+                for invalid_strength in (
+                    1.5,
+                    True,
+                    "0.75",
+                    b"0.75",
+                    None,
+                    float("nan"),
+                    float("inf"),
+                ):
+                    with self.subTest(strength=invalid_strength):
+                        with self.assertRaises(EnhancementError):
+                            enhance.enhance_audio(
+                                str(input_wav),
+                                str(temp / "full.wav"),
+                                str(temp / "mix.wav"),
+                                strength=invalid_strength,
+                            )
+                loader.assert_not_called()
 
     def test_enhance_audio_allows_playable_silence(self) -> None:
         from core import enhance
@@ -118,6 +132,61 @@ class EnhancementContractTest(unittest.TestCase):
                         str(temp / "full.wav"),
                         str(temp / "mix.wav"),
                     )
+
+    def test_runtime_excludes_model_loading(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            samples = np.full(48_000, 0.2, dtype=np.float32)
+            input_wav = temp / "original.wav"
+            _write_pcm16_wav(input_wav, samples)
+            backend = _FakeEnhancer(samples)
+            timer = mock.Mock(side_effect=[10.0, 12.5])
+
+            def load_backend():
+                self.assertEqual(timer.call_count, 0)
+                return backend
+
+            with (
+                mock.patch.object(enhance, "load_enhancer", side_effect=load_backend),
+                mock.patch.object(enhance.time, "perf_counter", timer),
+            ):
+                output = enhance.enhance_audio(
+                    str(input_wav),
+                    str(temp / "full.wav"),
+                    str(temp / "mix.wav"),
+                )
+
+        self.assertEqual(output["runtime_seconds"], 2.5)
+
+    def test_load_enhancer_singleton_is_thread_safe(self) -> None:
+        from core import enhance
+
+        loaded_backend = object()
+        load_calls: list[str | None] = []
+
+        def fake_backend(model_dir: str | None):
+            load_calls.append(model_dir)
+            time.sleep(0.02)
+            return loaded_backend
+
+        with (
+            mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
+            mock.patch.object(enhance, "_ENHANCER_MODEL_DIR", None),
+            mock.patch.object(
+                enhance, "_DeepFilterNetBackend", side_effect=fake_backend
+            ),
+        ):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                backends = list(
+                    executor.map(
+                        lambda _: enhance.load_enhancer("model-dir"), range(8)
+                    )
+                )
+
+        self.assertEqual(load_calls, ["model-dir"])
+        self.assertTrue(all(backend is loaded_backend for backend in backends))
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ class FakeBackend:
         self.normalize_calls = 0
         self.enhance_calls = 0
         self.asr_calls: list[str] = []
+        self.asr_inference_identities: list[tuple[str, str]] = []
         self.fail_enhancement = False
         self.fail_after_asr = False
         self.fail_events = False
@@ -92,8 +93,16 @@ class FakeBackend:
             "warnings": self.enhancement_warnings,
         }
 
-    def transcribe_audio(self, audio_path: str, language: str = "zh") -> TranscriptResult:
+    def transcribe_audio(
+        self,
+        audio_path: str,
+        language: str = "zh",
+        *,
+        model_name: str = "base",
+        device: str = "auto",
+    ) -> TranscriptResult:
         self.asr_calls.append(audio_path)
+        self.asr_inference_identities.append((model_name, device))
         is_after = Path(audio_path).name == "enhanced_mix.wav"
         if is_after and self.fail_after_asr:
             raise ASRInferenceError("测试增强轨转写失败")
@@ -470,6 +479,15 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(second.status, ProcessStatus.SUCCESS)
         self.assertEqual(self.backend.enhancer_load_calls, 1)
         self.assertEqual(self.backend.asr_load_calls, [("base", "cpu"), ("tiny", "cpu")])
+        self.assertEqual(
+            self.backend.asr_inference_identities,
+            [
+                ("base", "cpu"),
+                ("base", "cpu"),
+                ("tiny", "cpu"),
+                ("tiny", "cpu"),
+            ],
+        )
 
 
 if __name__ == "__main__":

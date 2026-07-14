@@ -419,6 +419,7 @@ def _process_audio_locked(
         audio_path=paths.original,
         language=str(config["asr"]["language"]),
         expected_model=str(config["asr"]["model"]),
+        device=device,
         result=result,
         runtime_field="asr_before_seconds",
         failure_code=ErrorCode.ASR_BEFORE_FAILED,
@@ -431,6 +432,7 @@ def _process_audio_locked(
             audio_path=paths.enhanced_mix,
             language=str(config["asr"]["language"]),
             expected_model=str(config["asr"]["model"]),
+            device=device,
             result=result,
             runtime_field="asr_after_seconds",
             failure_code=ErrorCode.ASR_AFTER_FAILED,
@@ -902,6 +904,7 @@ def _run_asr(
     audio_path: Path,
     language: str,
     expected_model: str,
+    device: str,
     result: ProcessResult,
     runtime_field: str,
     failure_code: ErrorCode,
@@ -910,7 +913,12 @@ def _run_asr(
 ) -> TranscriptResult | None:
     started = time.monotonic()
     try:
-        transcript = dependencies.transcribe_audio(str(audio_path), language=language)
+        transcript = dependencies.transcribe_audio(
+            str(audio_path),
+            language=language,
+            model_name=expected_model,
+            device=device,
+        )
         transcript = _validated_transcript_result(transcript, track_name)
         if transcript.error is not None:
             raise ASRInferenceError(

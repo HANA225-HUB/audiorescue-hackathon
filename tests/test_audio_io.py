@@ -1,8 +1,11 @@
+import json
 import math
+import subprocess
 import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -58,23 +61,173 @@ class AudioIOContractTest(unittest.TestCase):
             self.assertIsNotNone(meta.rms_dbfs)
 
     def test_normalize_audio_rejects_missing_empty_and_too_long_inputs(self) -> None:
-        from core.audio_io import normalize_audio
+        from core import audio_io
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             with self.assertRaises(InputAudioError):
-                normalize_audio(str(temp / "missing.wav"), str(temp / "out.wav"))
+                audio_io.normalize_audio(
+                    str(temp / "missing.wav"), str(temp / "out.wav")
+                )
 
             empty = temp / "empty.wav"
             empty.write_bytes(b"")
             with self.assertRaises(InputAudioError):
-                normalize_audio(str(empty), str(temp / "out.wav"))
+                audio_io.normalize_audio(str(empty), str(temp / "out.wav"))
 
             too_long = temp / "too_long.wav"
             samples = np.zeros(61 * 8_000, dtype=np.float32)
             _write_pcm16_wav(too_long, samples, 8_000)
-            with self.assertRaises(InputTooLongError):
-                normalize_audio(str(too_long), str(temp / "out.wav"))
+            with mock.patch.object(audio_io, "_read_wav") as read_wav:
+                with self.assertRaises(InputTooLongError):
+                    audio_io.normalize_audio(
+                        str(too_long), str(temp / "out.wav")
+                    )
+                read_wav.assert_not_called()
+
+    def test_oversized_non_wav_is_rejected_before_external_tools(self) -> None:
+        from core import audio_io
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "oversized.mp3"
+            with input_path.open("wb") as handle:
+                handle.seek(audio_io.MAX_INPUT_BYTES)
+                handle.write(b"\0")
+
+            with mock.patch.object(audio_io.subprocess, "run") as runner:
+                with self.assertRaises(InputAudioError) as raised:
+                    audio_io.normalize_audio(
+                        str(input_path), str(temp / "out.wav")
+                    )
+
+            self.assertEqual(raised.exception.public_message, "输入音频文件过大")
+            runner.assert_not_called()
+
+    def test_ffprobe_rejects_overlong_non_wav_before_decode(self) -> None:
+        from core import audio_io
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "overlong.mp3"
+            input_path.write_bytes(b"fake mp3")
+            probe_result = mock.Mock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "format": {"duration": "61.0", "size": "8"},
+                        "streams": [{"duration": "61.0"}],
+                    }
+                ),
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    audio_io.shutil, "which", return_value="/tools/ffprobe"
+                ),
+                mock.patch.object(
+                    audio_io.subprocess, "run", return_value=probe_result
+                ) as runner,
+            ):
+                with self.assertRaises(InputTooLongError):
+                    audio_io.normalize_audio(
+                        str(input_path), str(temp / "out.wav")
+                    )
+
+            self.assertEqual(runner.call_count, 1)
+            command = runner.call_args.args[0]
+            self.assertIn("-nostdin", command)
+            self.assertEqual(
+                runner.call_args.kwargs["timeout"],
+                audio_io.FFPROBE_TIMEOUT_SECONDS,
+            )
+
+    def test_non_wav_probe_failure_has_stable_input_error(self) -> None:
+        from core import audio_io
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "corrupt.m4a"
+            input_path.write_bytes(b"not media")
+            probe_result = mock.Mock(
+                returncode=1, stdout="", stderr="invalid container"
+            )
+            with (
+                mock.patch.object(
+                    audio_io.shutil, "which", return_value="/tools/ffprobe"
+                ),
+                mock.patch.object(
+                    audio_io.subprocess, "run", return_value=probe_result
+                ),
+            ):
+                with self.assertRaises(InputAudioError) as raised:
+                    audio_io.normalize_audio(
+                        str(input_path), str(temp / "out.wav")
+                    )
+
+            self.assertEqual(
+                raised.exception.public_message,
+                "输入音频无法读取或不包含音频流",
+            )
+
+    def test_ffmpeg_decode_has_no_stdin_timeout_or_truncation(self) -> None:
+        from core import audio_io
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "valid-duration.mp3"
+            input_path.write_bytes(b"fake mp3")
+            probe_result = mock.Mock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "format": {"duration": "1.0", "size": "8"},
+                        "streams": [{"duration": "1.0"}],
+                    }
+                ),
+                stderr="",
+            )
+            timeout = subprocess.TimeoutExpired(cmd="ffmpeg", timeout=120)
+            with (
+                mock.patch.object(
+                    audio_io.shutil,
+                    "which",
+                    side_effect=lambda name: f"/tools/{name}",
+                ),
+                mock.patch.object(
+                    audio_io.subprocess,
+                    "run",
+                    side_effect=[probe_result, timeout],
+                ) as runner,
+            ):
+                with self.assertRaises(InputAudioError) as raised:
+                    audio_io.normalize_audio(
+                        str(input_path), str(temp / "out.wav")
+                    )
+
+            self.assertEqual(raised.exception.public_message, "输入音频解码超时")
+            self.assertEqual(runner.call_count, 2)
+            decode_command = runner.call_args_list[1].args[0]
+            decode_kwargs = runner.call_args_list[1].kwargs
+            self.assertIn("-nostdin", decode_command)
+            self.assertNotIn("-t", decode_command)
+            self.assertEqual(decode_kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(
+                decode_kwargs["timeout"], audio_io.FFMPEG_TIMEOUT_SECONDS
+            )
+
+    def test_corrupt_wav_header_has_stable_input_error(self) -> None:
+        from core import audio_io
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "corrupt.wav"
+            input_path.write_bytes(b"not a wav")
+
+            with self.assertRaises(InputAudioError) as raised:
+                audio_io.normalize_audio(str(input_path), str(temp / "out.wav"))
+
+            self.assertEqual(raised.exception.public_message, "输入 WAV 头无法读取")
 
     def test_inspect_audio_reports_warning_items_for_clipping_and_near_silence(self) -> None:
         from core.audio_io import inspect_audio
