@@ -67,6 +67,145 @@ DELIVERY_FILENAMES = {
     "waveform_image": "waveform.png",
 }
 
+CORE_WARNING_CODES = {
+    "INPUT_INVALID",
+    "INPUT_TOO_LONG",
+    "INPUT_CLIPPED",
+    "INPUT_NEAR_SILENT",
+    "INPUT_STEREO_DOWNMIXED",
+    "INPUT_RESAMPLED",
+    "ENHANCE_FAILED",
+    "OUTPUT_INVALID",
+    "OUTPUT_PEAK_PROTECTED",
+    "ASR_FAILED",
+    "ASR_BEFORE_FAILED",
+    "ASR_AFTER_FAILED",
+    "ASR_EMPTY",
+    "VIS_FAILED",
+    "EVENTS_SKIPPED",
+    "CACHE_USED",
+    "INTERNAL_ERROR",
+}
+
+UI_WARNING_CODES = {
+    "UI_ERROR",
+    "UI_FIXTURE_DISABLED",
+    "UI_FIXTURE_LOAD_FAILED",
+    "UI_PIPELINE_UNAVAILABLE",
+    "UI_PIPELINE_FAILED",
+    "UI_FILE_DELIVERY_FAILED",
+    "UI_FILE_DELIVERY_OPTIONAL",
+}
+
+WARNING_CODES = CORE_WARNING_CODES | UI_WARNING_CODES | {"UNKNOWN"}
+
+WARNING_MESSAGES = {
+    "INPUT_INVALID": "输入文件无效或无法读取。",
+    "INPUT_TOO_LONG": "输入超过 60 秒限制。",
+    "INPUT_CLIPPED": "输入存在削波，结果可能不稳定。",
+    "INPUT_NEAR_SILENT": "输入接近静音，结果可能不稳定。",
+    "INPUT_STEREO_DOWNMIXED": "输入已下混为单声道。",
+    "INPUT_RESAMPLED": "输入已重采样为 48 kHz。",
+    "ENHANCE_FAILED": "增强阶段失败，请更换样例或使用可用缓存。",
+    "OUTPUT_INVALID": "输出音频无效，相关结果不可用。",
+    "OUTPUT_PEAK_PROTECTED": "输出已进行峰值保护。",
+    "ASR_FAILED": "转写阶段失败。",
+    "ASR_BEFORE_FAILED": "处理前转写不可用，其他可用结果已保留。",
+    "ASR_AFTER_FAILED": "增强后转写不可用，其他可用结果已保留。",
+    "ASR_EMPTY": "转写为空文本，可能是静音或语音过弱。",
+    "VIS_FAILED": "可视化生成失败，音频和转写结果仍可查看。",
+    "EVENTS_SKIPPED": "事件识别已跳过，不影响核心链路。",
+    "CACHE_USED": "使用本地缓存结果。",
+    "INTERNAL_ERROR": "内部处理异常，细节已隐藏。",
+    "UI_ERROR": "页面展示异常，细节已隐藏。",
+    "UI_FIXTURE_DISABLED": "正式模式未启用开发 fixture，请上传音频。",
+    "UI_FIXTURE_LOAD_FAILED": "开发 fixture 读取失败，细节已隐藏。",
+    "UI_PIPELINE_UNAVAILABLE": "真实处理管线暂不可用，请检查后端接入状态。",
+    "UI_PIPELINE_FAILED": "真实处理管线调用失败，细节已隐藏。",
+    "UI_FILE_DELIVERY_FAILED": "页面文件投递失败，相关播放器或下载已关闭。",
+    "UI_FILE_DELIVERY_OPTIONAL": "调试文件投递失败，核心播放结果不受影响。",
+    "UNKNOWN": "出现未分类警告，细节已隐藏。",
+}
+
+WARNING_MODULES = {
+    "audio_io",
+    "enhance",
+    "transcribe",
+    "asr",
+    "visualization",
+    "pipeline",
+    "cache",
+    "events",
+    "core",
+    "ui",
+    "unknown",
+}
+
+DETAIL_NUMBER_KEYS = {
+    "attempt",
+    "attempts",
+    "count",
+    "runs",
+    "sample_rate",
+    "channels",
+    "duration_seconds",
+    "runtime_seconds",
+    "total_seconds",
+    "strength",
+    "peak_abs",
+    "rms_dbfs",
+    "clipped_ratio",
+    "silent_ratio",
+    "exit_code",
+}
+
+DETAIL_BOOL_KEYS = {"recoverable", "required", "cache_hit", "cold_start"}
+
+DETAIL_ENUM_VALUES = {
+    "track": {"before", "after", "original", "mixed", "full"},
+    "role": {"original", "mixed", "full", "spectrogram", "waveform"},
+    "stage": {
+        "input",
+        "normalize",
+        "enhance",
+        "asr_before",
+        "asr_after",
+        "visualization",
+        "events",
+        "cache",
+        "pipeline",
+        "ui",
+    },
+    "reason": {
+        "missing",
+        "unavailable",
+        "delivery_failed",
+        "staging_failed",
+        "registration_failed",
+        "not_allowed",
+        "source_unavailable",
+    },
+    "device": {"auto", "cpu", "cuda", "mps", "custom", "unknown"},
+}
+
+DELIVERY_ROLES = (
+    "original_audio",
+    "mixed_audio",
+    "full_audio",
+    "spectrogram_image",
+    "waveform_image",
+)
+
+REQUIRED_DELIVERY_ROLES = ("original_audio", "mixed_audio")
+
+DELIVERY_ROLE_LABELS = {
+    "original_audio": "original",
+    "mixed_audio": "mixed",
+    "full_audio": "full",
+    "spectrogram_image": "spectrogram",
+    "waveform_image": "waveform",
+}
+
 
 def json_ready(value: Any) -> Any:
     if isinstance(value, Enum):
@@ -177,7 +316,7 @@ def warning_codes(result: dict[str, Any]) -> set[str]:
     for item in result.get("warnings") or []:
         code = as_dict(item).get("code")
         if code:
-            codes.add(str(code))
+            codes.add(_normalize_warning_code(code))
     return codes
 
 
@@ -197,7 +336,7 @@ def transcript_text(transcript: Any) -> str:
         return text
     error = display_text(data.get("error"))
     if error:
-        return f"转写不可用：{error}"
+        return "转写不可用：请查看警告状态。"
     return ""
 
 
@@ -400,29 +539,49 @@ def diff_html(result: dict[str, Any]) -> str:
     return supplied_text
 
 
-def _safe_details(details: Any) -> dict[str, Any]:
-    blocked = {"traceback", "stack", "stacktrace", "exception"}
+def _normalize_warning_code(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    code = str(value or "").strip().upper()
+    return code if code in WARNING_CODES else "UNKNOWN"
 
-    def scrub(value: Any) -> Any:
-        if isinstance(value, dict):
-            safe: dict[str, Any] = {}
-            for key, item in value.items():
-                lowered = str(key).lower()
-                if (
-                    lowered in blocked
-                    or lowered == "path"
-                    or lowered.endswith("_path")
-                    or lowered.endswith("path")
-                ):
-                    continue
-                safe[str(key)] = scrub(item)
-            return safe
-        if isinstance(value, (list, tuple)):
-            return [scrub(item) for item in value]
+
+def _normalize_warning_module(value: Any) -> str:
+    module = str(value or "").strip().lower()
+    if re.fullmatch(r"[a-z_]{2,32}", module) and module in WARNING_MODULES:
+        return module
+    return "unknown"
+
+
+def _safe_detail_value(key: str, value: Any) -> Any:
+    if key in DETAIL_BOOL_KEYS and isinstance(value, bool):
         return value
+    if key in DETAIL_NUMBER_KEYS and not isinstance(value, bool):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if number != number or number in {float("inf"), float("-inf")}:
+            return None
+        return int(number) if number.is_integer() else number
+    allowed_values = DETAIL_ENUM_VALUES.get(key)
+    if allowed_values is not None:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in allowed_values else None
+    return None
 
-    sanitized = scrub(as_dict(details))
-    return sanitized if isinstance(sanitized, dict) else {}
+
+def _safe_details(details: Any) -> dict[str, Any]:
+    raw = as_dict(details)
+    safe: dict[str, Any] = {}
+    for key, value in raw.items():
+        safe_key = str(key).strip().lower()
+        if not re.fullmatch(r"[a-z_]{2,32}", safe_key):
+            continue
+        safe_value = _safe_detail_value(safe_key, value)
+        if safe_value is not None:
+            safe[safe_key] = safe_value
+    return safe
 
 
 def warnings_html(result: dict[str, Any]) -> str:
@@ -432,15 +591,15 @@ def warnings_html(result: dict[str, Any]) -> str:
     parts = ["<div class='warning-list'>"]
     for item in warnings:
         data = as_dict(item)
-        code = html.escape(str(data.get("code") or "UNKNOWN"))
-        message = html.escape(str(data.get("message") or "未提供说明"))
-        module = html.escape(str(data.get("module") or "unknown"))
+        code = _normalize_warning_code(data.get("code"))
+        message = WARNING_MESSAGES.get(code, WARNING_MESSAGES["UNKNOWN"])
+        module = _normalize_warning_module(data.get("module"))
         recoverable = "可恢复" if data.get("recoverable", True) else "需处理"
         details = _safe_details(data.get("details"))
         parts.append("<div class='warning-item'>")
-        parts.append(f"<strong>{code}</strong>")
-        parts.append(f"<span>{message}</span>")
-        parts.append(f"<em>{module} / {recoverable}</em>")
+        parts.append(f"<strong>{html.escape(code)}</strong>")
+        parts.append(f"<span>{html.escape(message)}</span>")
+        parts.append(f"<em>{html.escape(module)} / {recoverable}</em>")
         if details:
             details_json = html.escape(json.dumps(details, ensure_ascii=False, indent=2))
             parts.append(f"<details><summary>工程细节</summary><pre>{details_json}</pre></details>")
@@ -528,33 +687,128 @@ def _download_delivery_html(
     )
 
 
+def _normalized_status(value: Any) -> str:
+    status = str(value or "failed").strip().lower()
+    return status if status in STATUS_LABELS else "failed"
+
+
+def _empty_delivery_mapping() -> dict[str, str | None]:
+    return {role: None for role in DELIVERY_ROLES}
+
+
+def _stage_result_files(
+    paths_by_role: dict[str, Any],
+    *,
+    allowed_roots: tuple[Path, ...],
+) -> dict[str, str | None]:
+    try:
+        staged = stage_files_for_gradio(
+            paths_by_role,
+            allowed_roots=allowed_roots,
+            base_dir=ROOT_DIR,
+        )
+    except Exception:
+        return _empty_delivery_mapping()
+    return {role: staged.get(role) for role in DELIVERY_ROLES}
+
+
+def _register_delivery_urls(staged_files: dict[str, str | None]) -> dict[str, str | None]:
+    try:
+        urls = register_files_for_delivery(
+            staged_files,
+            filenames_by_role=DELIVERY_FILENAMES,
+            allowed_roots=(default_staging_root(),),
+        )
+    except Exception:
+        return _empty_delivery_mapping()
+    return {role: urls.get(role) for role in DELIVERY_ROLES}
+
+
+def _delivery_warning(role: str, *, required: bool) -> dict[str, Any]:
+    track = DELIVERY_ROLE_LABELS.get(role, "original")
+    return {
+        "code": "UI_FILE_DELIVERY_FAILED" if required else "UI_FILE_DELIVERY_OPTIONAL",
+        "message": "",
+        "module": "ui",
+        "recoverable": True,
+        "details": {
+            "track": track,
+            "role": track,
+            "required": required,
+            "reason": "delivery_failed",
+        },
+    }
+
+
+def _warning_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _presentation_status_and_warnings(
+    result: dict[str, Any],
+    paths_by_role: dict[str, Any],
+    delivery_urls: dict[str, str | None],
+) -> tuple[str, list[dict[str, Any]]]:
+    raw_status = _normalized_status(result.get("status"))
+    ui_warnings: list[dict[str, Any]] = []
+
+    required_ok = {
+        role: bool(delivery_urls.get(role))
+        for role in REQUIRED_DELIVERY_ROLES
+    }
+    if raw_status in {"success", "partial"}:
+        for role, delivered in required_ok.items():
+            if not delivered:
+                ui_warnings.append(_delivery_warning(role, required=True))
+        delivered_count = sum(1 for delivered in required_ok.values() if delivered)
+        if delivered_count == len(REQUIRED_DELIVERY_ROLES):
+            presentation_status = raw_status
+        elif delivered_count > 0:
+            presentation_status = "partial"
+        else:
+            presentation_status = "failed"
+    else:
+        presentation_status = "failed"
+        for role in REQUIRED_DELIVERY_ROLES:
+            if paths_by_role.get(role) and not delivery_urls.get(role):
+                ui_warnings.append(_delivery_warning(role, required=True))
+
+    if paths_by_role.get("full_audio") and not delivery_urls.get("full_audio"):
+        ui_warnings.append(_delivery_warning("full_audio", required=False))
+
+    return presentation_status, ui_warnings
+
+
 def result_to_view(raw_result: Any) -> dict[str, Any]:
     result = as_dict(raw_result)
     if not result:
-        result = failed_result("未收到可展示的处理结果。", "INTERNAL_ERROR")
+        result = failed_result("", "UI_ERROR")
 
     mixed_path = result.get("mixed_output_path") or result.get("enhanced_audio_path")
     allowed_roots = _result_file_roots(result)
-    staged_files = stage_files_for_gradio(
-        {
-            "original_audio": result.get("original_audio_path"),
-            "mixed_audio": mixed_path,
-            "full_audio": result.get("full_output_path"),
-            "spectrogram_image": result.get("spectrogram_path"),
-            "waveform_image": result.get("waveform_path"),
-        },
-        allowed_roots=allowed_roots,
-        base_dir=ROOT_DIR,
+    paths_by_role = {
+        "original_audio": result.get("original_audio_path"),
+        "mixed_audio": mixed_path,
+        "full_audio": result.get("full_output_path"),
+        "spectrogram_image": result.get("spectrogram_path"),
+        "waveform_image": result.get("waveform_path"),
+    }
+    staged_files = _stage_result_files(paths_by_role, allowed_roots=allowed_roots)
+    delivery_urls = _register_delivery_urls(staged_files)
+    presentation_status, ui_warnings = _presentation_status_and_warnings(
+        result,
+        paths_by_role,
+        delivery_urls,
     )
-    delivery_urls = register_files_for_delivery(
-        staged_files,
-        filenames_by_role=DELIVERY_FILENAMES,
-        allowed_roots=(default_staging_root(),),
-    )
+    display_result = {
+        **result,
+        "status": presentation_status,
+        "warnings": _warning_list(result.get("warnings")) + ui_warnings,
+    }
     view = {
-        "status_md": status_markdown(result),
-        "input_md": input_markdown(result),
-        "playback_note_md": playback_note_markdown(result),
+        "status_md": status_markdown(display_result),
+        "input_md": input_markdown(display_result),
+        "playback_note_md": playback_note_markdown(display_result),
         "original_audio": _audio_delivery_html(
             title="处理前：标准化原轨",
             url=delivery_urls["original_audio"],
@@ -581,8 +835,8 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
             url=delivery_urls["waveform_image"],
             role="waveform_image",
         ),
-        "runtime_md": runtime_markdown(result),
-        "warnings_html": warnings_html(result),
+        "runtime_md": runtime_markdown(display_result),
+        "warnings_html": warnings_html(display_result),
         "mixed_download": _download_delivery_html(
             title="混合增强 WAV",
             url=delivery_urls["mixed_audio"],

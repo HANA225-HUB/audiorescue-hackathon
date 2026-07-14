@@ -5,7 +5,7 @@ import re
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
 from ui.file_delivery import clear_delivery_registry, lookup_delivery_entry
@@ -20,10 +20,69 @@ from ui.presenters import (
 )
 
 DELIVERY_URL_RE = re.compile(r"/audiorescue-files/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+")
+SENSITIVE_MARKERS = (
+    "SECRET_MARKER",
+    "/private/audio/input.wav",
+    "C:\\Users\\secret\\input.wav",
+    "https://example.test/model.pt?q=SECRET_MARKER",
+    "今天下午三点我们讨论保密项目",
+)
 
 
 def _delivery_urls(fragment: object) -> list[str]:
     return DELIVERY_URL_RE.findall(str(fragment))
+
+
+def _assert_no_sensitive_markers(testcase: unittest.TestCase, rendered: object) -> None:
+    text = str(rendered)
+    decoded_once = unquote(text)
+    decoded_twice = unquote(decoded_once)
+    variants: set[str] = set()
+    for marker in SENSITIVE_MARKERS:
+        variants.update(
+            {
+                marker,
+                quote(marker, safe=""),
+                quote(quote(marker, safe=""), safe=""),
+            }
+        )
+    for variant in variants:
+        testcase.assertNotIn(variant, text)
+        testcase.assertNotIn(variant, decoded_once)
+        testcase.assertNotIn(variant, decoded_twice)
+
+
+def _base_delivery_result(
+    root: Path,
+    *,
+    status: str = "success",
+    original_path: str | None = None,
+    mixed_path: str | None = None,
+    full_path: str | None = None,
+) -> dict[str, object]:
+    return {
+        "job_id": "safe_job",
+        "status": status,
+        "runtime": {"total_seconds": 1.0},
+        "input_meta": {
+            "source_name": "SECRET_MARKER_source.wav",
+            "source_format": "wav",
+            "sample_rate": 48000,
+            "channels": 1,
+            "duration_seconds": 1.0,
+            "peak_abs": 0.1,
+            "rms_dbfs": -20.0,
+            "clipped_ratio": 0.0,
+            "silent_ratio": 0.0,
+        },
+        "original_audio_path": original_path,
+        "mixed_output_path": mixed_path,
+        "enhanced_audio_path": mixed_path,
+        "full_output_path": full_path,
+        "warnings": [],
+        "events": [],
+        "config_snapshot": {},
+    }
 
 
 class PresenterTests(unittest.TestCase):
@@ -189,30 +248,60 @@ class PresenterTests(unittest.TestCase):
         self.assertIn("未生成", view["enhanced_audio"])
         self.assertIn("未生成", view["mixed_download"])
 
-    def test_warning_details_recursively_hide_path_and_trace_fields(self) -> None:
+    def test_warning_rendering_uses_fixed_messages_and_allowlisted_details(self) -> None:
         result = {
             "status": "partial",
             "job_id": "safe_job",
             "warnings": [
                 {
-                    "code": "ASR_FAILED",
-                    "message": "转写不可用",
+                    "code": "ASR_AFTER_FAILED",
+                    "message": "转写不可用 SECRET_MARKER /private/audio/input.wav",
+                    "module": "transcribe",
+                    "recoverable": True,
                     "details": {
-                        "path": "/private/input.wav",
+                        "attempt": 2,
+                        "track": "after",
+                        "note": "SECRET_MARKER",
+                        "url": "https://example.test/model.pt?q=SECRET_MARKER",
                         "nested": {
-                            "model_path": "/secret/model.pt",
-                            "traceback": "private stack",
-                            "attempt": 1,
+                            "traceback": "private stack SECRET_MARKER",
+                            "path": "/private/audio/input.wav",
                         },
                     },
-                }
+                },
+                {
+                    "code": "SECRET_MARKER_UNKNOWN",
+                    "message": "C:\\Users\\secret\\input.wav",
+                    "module": "C:\\Users\\secret\\module.py",
+                    "recoverable": False,
+                    "details": {"value": "今天下午三点我们讨论保密项目"},
+                },
             ],
         }
         rendered = result_to_view(result)["warnings_html"]
-        self.assertNotIn("/private/input.wav", rendered)
-        self.assertNotIn("/secret/model.pt", rendered)
-        self.assertNotIn("private stack", rendered)
+        self.assertIn("ASR_AFTER_FAILED", rendered)
+        self.assertIn("UNKNOWN", rendered)
+        self.assertIn("增强后转写不可用", rendered)
         self.assertIn("attempt", rendered)
+        self.assertIn("after", rendered)
+        self.assertNotIn("SECRET_MARKER_UNKNOWN", rendered)
+        self.assertNotIn("C:\\Users\\secret\\module.py", rendered)
+        self.assertIn("attempt", rendered)
+        _assert_no_sensitive_markers(self, rendered)
+
+    def test_transcript_error_text_is_not_displayed_raw(self) -> None:
+        result = load_fixture("process_result_ok")
+        result["transcript_after"] = {
+            "text": "",
+            "language": "zh",
+            "segments": [],
+            "runtime_seconds": 0.1,
+            "model_name": "base",
+            "error": "SECRET_MARKER /private/audio/input.wav",
+        }
+        rendered = result_to_view(result)["transcript_after_md"]
+        self.assertIn("转写不可用：请查看警告状态。", rendered)
+        _assert_no_sensitive_markers(self, rendered)
 
     def test_playback_note_exposes_both_loudness_tracks_when_available(self) -> None:
         result = load_fixture("process_result_ok")
@@ -321,6 +410,128 @@ class PresenterTests(unittest.TestCase):
                 self.assertNotIn("\\", rendered)
             self.assertIn("已隐藏文件名", visible_text)
             self.assertTrue(all(url.startswith("/audiorescue-files/") for url in _delivery_urls(client_html)))
+
+    def test_required_delivery_failures_downgrade_presentation_status_only(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            job_root = root / "outputs" / "safe_job" / "SECRET_MARKER"
+            job_root.mkdir(parents=True)
+            original = job_root / "SECRET_MARKER_original.wav"
+            mixed = job_root / "SECRET_MARKER_mixed.wav"
+            full = job_root / "SECRET_MARKER_full.wav"
+            original.write_bytes(b"original")
+            mixed.write_bytes(b"mixed")
+            full.write_bytes(b"full")
+
+            cases = [
+                ("original_missing", None, str(mixed), str(full), "partial"),
+                ("mixed_missing", str(original), None, str(full), "partial"),
+                ("both_missing", None, None, str(full), "failed"),
+                (
+                    "full_missing",
+                    str(original),
+                    str(mixed),
+                    str(job_root / "SECRET_MARKER_missing_full.wav"),
+                    "success",
+                ),
+            ]
+            for name, original_path, mixed_path, full_path, expected_status in cases:
+                with self.subTest(name=name), mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                    "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+                ):
+                    result = _base_delivery_result(
+                        root,
+                        original_path=original_path,
+                        mixed_path=mixed_path,
+                        full_path=full_path,
+                    )
+                    original_warnings = result["warnings"]
+                    view = result_to_view(result)
+
+                self.assertEqual(result["status"], "success")
+                self.assertIs(result["warnings"], original_warnings)
+                self.assertEqual(result["warnings"], [])
+                self.assertIn(f"data-status='{expected_status}'", view["status_md"])
+                if expected_status == "success":
+                    self.assertIn("UI_FILE_DELIVERY_OPTIONAL", view["warnings_html"])
+                    self.assertNotIn("UI_FILE_DELIVERY_FAILED", view["warnings_html"])
+                else:
+                    self.assertIn("UI_FILE_DELIVERY_FAILED", view["warnings_html"])
+                if original_path is None:
+                    self.assertNotIn("<audio", view["original_audio"])
+                else:
+                    self.assertIn("<audio", view["original_audio"])
+                if mixed_path is None:
+                    self.assertNotIn("<audio", view["enhanced_audio"])
+                    self.assertNotIn("下载 mixed.wav", view["mixed_download"])
+                else:
+                    self.assertIn("<audio", view["enhanced_audio"])
+                    self.assertIn("下载 mixed.wav", view["mixed_download"])
+                if name == "full_missing":
+                    self.assertNotIn("<audio", view["full_download"])
+                _assert_no_sensitive_markers(self, "\n".join(str(value) for value in view.values()))
+
+    def test_failed_core_status_is_never_upgraded_by_available_files(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            job_root = root / "outputs" / "safe_job"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            original.write_bytes(b"original")
+            mixed.write_bytes(b"mixed")
+            result = _base_delivery_result(
+                root,
+                status="failed",
+                original_path=str(original),
+                mixed_path=str(mixed),
+            )
+            with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+            ):
+                view = result_to_view(result)
+
+        self.assertIn("data-status='failed'", view["status_md"])
+        self.assertIn("<audio", view["original_audio"])
+        self.assertIn("<audio", view["enhanced_audio"])
+
+    def test_staging_or_registration_exceptions_fail_closed_without_leaking_text(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp:
+            root = Path(root_tmp)
+            job_root = root / "outputs" / "safe_job"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            original.write_bytes(b"original")
+            mixed.write_bytes(b"mixed")
+            result = _base_delivery_result(
+                root,
+                original_path=str(original),
+                mixed_path=str(mixed),
+            )
+
+            patches = [
+                mock.patch(
+                    "ui.presenters.stage_files_for_gradio",
+                    side_effect=OSError("SECRET_MARKER /private/audio/input.wav"),
+                ),
+                mock.patch(
+                    "ui.presenters.register_files_for_delivery",
+                    side_effect=RuntimeError("SECRET_MARKER C:\\Users\\secret\\input.wav"),
+                ),
+            ]
+            for patcher in patches:
+                with self.subTest(patcher=str(patcher)), mock.patch(
+                    "ui.presenters.ROOT_DIR", root
+                ), patcher:
+                    view = result_to_view(result)
+                self.assertIn("data-status='failed'", view["status_md"])
+                self.assertIn("UI_FILE_DELIVERY_FAILED", view["warnings_html"])
+                self.assertNotIn("<audio", view["original_audio"])
+                self.assertNotIn("<audio", view["enhanced_audio"])
+                _assert_no_sensitive_markers(self, "\n".join(str(value) for value in view.values()))
 
     def test_status_markup_covers_input_error_fixture(self) -> None:
         rendered = result_to_view(load_fixture("process_result_input_error"))["status_md"]

@@ -147,8 +147,11 @@ def stage_files_for_gradio(
         return staged
 
     root = staging_root or default_staging_root()
-    cleanup_stale_staging(staging_root=root)
-    session_dir = _prepare_session_dir(root)
+    try:
+        cleanup_stale_staging(staging_root=root)
+        session_dir = _prepare_session_dir(root)
+    except (OSError, RuntimeError):
+        return staged
     for role, source in resolved_by_role.items():
         destination = session_dir / _ROLE_FILENAMES[role]
         try:

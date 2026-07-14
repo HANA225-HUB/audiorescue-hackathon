@@ -229,6 +229,35 @@ class FileStagingTests(unittest.TestCase):
 
             self.assertIsNone(staged["original_audio"])
 
+    def test_prepare_or_chmod_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            source = root / "allowed" / "SECRET_USER_original.wav"
+            source.parent.mkdir()
+            source.write_bytes(b"secret")
+            staging_root = Path(stage_tmp) / "ui-stage"
+
+            with mock.patch("ui.file_staging.os.chmod", side_effect=OSError("SECRET_USER")):
+                staged = stage_files_for_gradio(
+                    {"original_audio": source},
+                    allowed_roots=(source.parent,),
+                    base_dir=root,
+                    staging_root=staging_root,
+                )
+            self.assertIsNone(staged["original_audio"])
+
+            with mock.patch(
+                "ui.file_staging._prepare_session_dir",
+                side_effect=RuntimeError("SECRET_USER"),
+            ):
+                staged = stage_files_for_gradio(
+                    {"mixed_audio": source},
+                    allowed_roots=(source.parent,),
+                    base_dir=root,
+                    staging_root=staging_root,
+                )
+            self.assertIsNone(staged["mixed_audio"])
+
     def test_many_sensitive_source_names_do_not_appear_in_staged_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
             root = Path(tmp)

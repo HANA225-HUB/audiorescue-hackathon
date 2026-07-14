@@ -14,6 +14,7 @@ from ui.file_delivery import (
     clear_delivery_registry,
     lookup_delivery_entry,
     register_file_for_delivery,
+    register_files_for_delivery,
 )
 from ui.file_staging import cleanup_stale_staging
 
@@ -98,6 +99,29 @@ class FileDeliveryTests(unittest.TestCase):
             self.assertNotIn(":", str(first))
             self.assertNotIn("file=", str(first))
             self.assertTrue(str(first).endswith("/original.wav"))
+
+    def test_bulk_registration_fails_closed_per_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+
+            def fake_register(path, **kwargs):
+                if str(path).endswith("first.wav"):
+                    raise RuntimeError("SECRET_WORKSPACE /private/audio/input.wav")
+                return "/audiorescue-files/token/second.wav"
+
+            with mock.patch("ui.file_delivery.register_file_for_delivery", side_effect=fake_register):
+                urls = register_files_for_delivery(
+                    {"original_audio": first, "mixed_audio": second},
+                    filenames_by_role={"original_audio": "original.wav", "mixed_audio": "mixed.wav"},
+                    allowed_roots=(root,),
+                )
+
+            self.assertIsNone(urls["original_audio"])
+            self.assertEqual(urls["mixed_audio"], "/audiorescue-files/token/second.wav")
 
     def test_get_head_and_range_serve_expected_bytes_and_headers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

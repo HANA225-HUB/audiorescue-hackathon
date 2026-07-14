@@ -185,15 +185,18 @@ def register_files_for_delivery(
     ttl_seconds: int | None = None,
 ) -> dict[str, str | None]:
     filenames = filenames_by_role or {}
-    return {
-        role: register_file_for_delivery(
-            path,
-            filename=filenames.get(role),
-            allowed_roots=allowed_roots,
-            ttl_seconds=ttl_seconds,
-        )
-        for role, path in files_by_role.items()
-    }
+    urls: dict[str, str | None] = {}
+    for role, path in files_by_role.items():
+        try:
+            urls[role] = register_file_for_delivery(
+                path,
+                filename=filenames.get(role),
+                allowed_roots=allowed_roots,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception:
+            urls[role] = None
+    return urls
 
 
 def lookup_delivery_entry(url_or_token: str) -> DeliveryEntry | None:

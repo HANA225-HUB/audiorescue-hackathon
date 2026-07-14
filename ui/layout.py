@@ -134,8 +134,8 @@ def _fixture_mode_default() -> bool:
 def _run_fixture(fixture_name: str) -> tuple[Any, ...]:
     try:
         result = load_fixture(fixture_name)
-    except Exception as exc:
-        result = failed_result(f"fixture 读取失败：{exc}", "INTERNAL_ERROR")
+    except Exception:
+        result = failed_result("", "UI_FIXTURE_LOAD_FAILED")
     return result_to_ui_tuple(result)
 
 
@@ -151,8 +151,8 @@ def _run_real_pipeline(
     input_path = getattr(input_file, "name", input_file)
     try:
         from core.pipeline import process_audio
-    except Exception as exc:
-        return result_to_ui_tuple(failed_result(f"C 的 process_audio 尚不可用：{exc}", "INTERNAL_ERROR"))
+    except Exception:
+        return result_to_ui_tuple(failed_result("", "UI_PIPELINE_UNAVAILABLE"))
 
     try:
         result = process_audio(
@@ -162,10 +162,10 @@ def _run_real_pipeline(
             reference_text=reference_text or None,
             force_recompute=bool(force_recompute),
         )
-    except NotImplementedError as exc:
-        result = failed_result(f"真实管线尚未实现：{exc}", "INTERNAL_ERROR")
-    except Exception as exc:
-        result = failed_result(f"真实管线调用失败：{exc}", "INTERNAL_ERROR")
+    except NotImplementedError:
+        result = failed_result("", "UI_PIPELINE_UNAVAILABLE")
+    except Exception:
+        result = failed_result("", "UI_PIPELINE_FAILED")
     return result_to_ui_tuple(result)
 
 
@@ -181,8 +181,8 @@ def _run(
         if not _fixture_mode_default():
             return result_to_ui_tuple(
                 failed_result(
-                    "正式模式禁止使用前端 fixture；如需开发联调，请在独立进程显式启用。",
-                    "INPUT_INVALID",
+                    "",
+                    "UI_FIXTURE_DISABLED",
                 )
             )
         return _run_fixture(fixture_name)

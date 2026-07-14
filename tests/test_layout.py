@@ -1,10 +1,13 @@
 import os
 import re
 import sys
+import tempfile
 import types
 import unittest
 from asyncio import run
+from pathlib import Path
 from unittest import mock
+from urllib.parse import quote, unquote
 
 from ui.presenters import UI_TUPLE_KEYS
 from ui.file_delivery import FileDeliveryMiddleware
@@ -13,11 +16,38 @@ from ui.layout import (
     OfflineHtmlResourceMiddleware,
     _fixture_mode_default,
     _run,
+    _run_fixture,
     _run_real_pipeline,
     build_demo,
     offline_launch_app_kwargs,
     strip_remote_html_resources,
 )
+
+SENSITIVE_MARKERS = (
+    "SECRET_MARKER",
+    "/private/audio/input.wav",
+    "C:\\Users\\secret\\input.wav",
+    "https://example.test/model.pt?q=SECRET_MARKER",
+)
+
+
+def _assert_no_sensitive_markers(testcase: unittest.TestCase, rendered: object) -> None:
+    text = str(rendered)
+    decoded_once = unquote(text)
+    decoded_twice = unquote(decoded_once)
+    variants: set[str] = set()
+    for marker in SENSITIVE_MARKERS:
+        variants.update(
+            {
+                marker,
+                quote(marker, safe=""),
+                quote(quote(marker, safe=""), safe=""),
+            }
+        )
+    for variant in variants:
+        testcase.assertNotIn(variant, text)
+        testcase.assertNotIn(variant, decoded_once)
+        testcase.assertNotIn(variant, decoded_twice)
 
 
 def _relative_luminance(color: str) -> float:
@@ -65,27 +95,81 @@ class LayoutSafetyTest(unittest.TestCase):
         ) as run_fixture:
             rendered = _run(True, "process_result_ok", None, "标准", "", False)
         run_fixture.assert_not_called()
-        self.assertTrue(any("正式模式禁止" in str(item) for item in rendered))
+        self.assertTrue(any("UI_FIXTURE_DISABLED" in str(item) for item in rendered))
+        self.assertTrue(any("正式模式未启用开发 fixture" in str(item) for item in rendered))
+
+    def test_fixture_loader_exception_is_sanitized(self) -> None:
+        with mock.patch(
+            "ui.layout.load_fixture",
+            side_effect=RuntimeError("SECRET_MARKER /private/audio/input.wav"),
+        ):
+            rendered = _run_fixture("process_result_ok")
+
+        combined = "\n".join(str(item) for item in rendered)
+        self.assertIn("UI_FIXTURE_LOAD_FAILED", combined)
+        self.assertIn("开发 fixture 读取失败", combined)
+        _assert_no_sensitive_markers(self, combined)
+
+    def test_pipeline_import_and_call_exceptions_are_sanitized(self) -> None:
+        original_import = __import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "core.pipeline":
+                raise ImportError("SECRET_MARKER https://example.test/model.pt?q=SECRET_MARKER")
+            return original_import(name, globals, locals, fromlist, level)
+
+        input_file = types.SimpleNamespace(name="/tmp/dev_input.wav")
+        with mock.patch("builtins.__import__", side_effect=guarded_import):
+            import_rendered = _run_real_pipeline(input_file, "标准", "", False)
+        import_combined = "\n".join(str(item) for item in import_rendered)
+        self.assertIn("UI_PIPELINE_UNAVAILABLE", import_combined)
+        _assert_no_sensitive_markers(self, import_combined)
+
+        fake_pipeline = types.ModuleType("core.pipeline")
+
+        def fake_process_audio(**kwargs):
+            raise RuntimeError("SECRET_MARKER C:\\Users\\secret\\input.wav")
+
+        fake_pipeline.process_audio = fake_process_audio
+        with mock.patch.dict(sys.modules, {"core.pipeline": fake_pipeline}):
+            call_rendered = _run_real_pipeline(input_file, "标准", "", False)
+        call_combined = "\n".join(str(item) for item in call_rendered)
+        self.assertIn("UI_PIPELINE_FAILED", call_combined)
+        _assert_no_sensitive_markers(self, call_combined)
 
     def test_real_pipeline_smoke_uses_process_audio_contract(self) -> None:
         calls = []
         fake_pipeline = types.ModuleType("core.pipeline")
 
-        def fake_process_audio(**kwargs):
-            calls.append(kwargs)
-            return {
-                "job_id": "ui_smoke",
-                "status": "success",
-                "runtime": {"total_seconds": 0.1},
-                "warnings": [],
-                "events": [],
-                "config_snapshot": {},
-            }
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            job_root = root / "outputs" / "ui_smoke"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            original.write_bytes(b"original")
+            mixed.write_bytes(b"mixed")
 
-        fake_pipeline.process_audio = fake_process_audio
-        input_file = types.SimpleNamespace(name="/tmp/dev_input.wav")
-        with mock.patch.dict(sys.modules, {"core.pipeline": fake_pipeline}):
-            rendered = _run_real_pipeline(input_file, "轻度", "", True)
+            def fake_process_audio(**kwargs):
+                calls.append(kwargs)
+                return {
+                    "job_id": "ui_smoke",
+                    "status": "success",
+                    "runtime": {"total_seconds": 0.1},
+                    "original_audio_path": str(original),
+                    "mixed_output_path": str(mixed),
+                    "enhanced_audio_path": str(mixed),
+                    "warnings": [],
+                    "events": [],
+                    "config_snapshot": {},
+                }
+
+            fake_pipeline.process_audio = fake_process_audio
+            input_file = types.SimpleNamespace(name="/tmp/dev_input.wav")
+            with mock.patch.dict(sys.modules, {"core.pipeline": fake_pipeline}), mock.patch(
+                "ui.presenters.ROOT_DIR", root
+            ), mock.patch.dict(os.environ, {"AUDIORESCUE_UI_STAGING_DIR": str(Path(stage_tmp) / "ui-stage")}):
+                rendered = _run_real_pipeline(input_file, "轻度", "", True)
 
         self.assertEqual(len(rendered), len(UI_TUPLE_KEYS))
         self.assertEqual(
