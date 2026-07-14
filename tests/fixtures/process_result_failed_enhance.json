@@ -1,0 +1,68 @@
+{
+  "job_id": "fixture_failed_enhance",
+  "status": "failed",
+  "runtime": {
+    "decode_seconds": 0.2,
+    "enhancer_load_seconds": 0.0,
+    "enhancement_seconds": 0.0,
+    "asr_load_seconds": 0.0,
+    "asr_before_seconds": 1.6,
+    "asr_after_seconds": 0.0,
+    "visualization_seconds": 0.0,
+    "event_seconds": 0.0,
+    "persistence_seconds": 0.1,
+    "total_seconds": 1.9,
+    "cache_hit": false,
+    "cold_start": false,
+    "device": "cpu"
+  },
+  "input_meta": {
+    "source_name": "dev_smoke_s01_fan.wav",
+    "sample_rate": 48000,
+    "channels": 1,
+    "duration_seconds": 12.0,
+    "peak_abs": 0.91,
+    "rms_dbfs": -21.6,
+    "clipped_ratio": 0.0,
+    "silent_ratio": 0.03,
+    "normalized_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+    "original_sample_rate": 48000,
+    "original_channels": 1,
+    "source_format": "wav"
+  },
+  "original_audio_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+  "enhanced_audio_path": null,
+  "full_output_path": null,
+  "mixed_output_path": null,
+  "transcript_before": {
+    "text": "今天下午三点我们在实验室讨论语音处理项目的最终方案",
+    "language": "zh",
+    "segments": [],
+    "runtime_seconds": 1.6,
+    "model_name": "whisper-base",
+    "error": null
+  },
+  "transcript_after": null,
+  "cer_before": null,
+  "cer_after": null,
+  "text_diff_html": null,
+  "waveform_path": null,
+  "spectrogram_path": null,
+  "events": [],
+  "warnings": [
+    {
+      "code": "ENHANCE_FAILED",
+      "message": "增强模型未能生成可播放结果，请换固定样例或使用缓存结果。",
+      "module": "enhance",
+      "recoverable": true,
+      "details": {}
+    }
+  ],
+  "config_snapshot": {
+    "strength": 0.75,
+    "enable_events": false,
+    "asr_model": "whisper-base",
+    "asr_language": "zh",
+    "sample_notice": "开发联调样例，非比赛效果证据"
+  }
+}
