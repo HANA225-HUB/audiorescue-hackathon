@@ -45,7 +45,7 @@ body,
 .gradio-container {
   max-width: 1180px !important;
   color: var(--ar-ink);
-  padding: 24px 22px 34px !important;
+  padding: 14px 22px 30px !important;
   overflow-x: hidden;
 }
 
@@ -59,14 +59,14 @@ body,
   border-radius: 8px;
   background: var(--ar-panel);
   box-shadow: var(--ar-shadow);
-  padding: 18px 20px !important;
-  margin-bottom: 14px !important;
+  padding: 12px 18px !important;
+  margin-bottom: 8px !important;
 }
 
 .ar-hero h1 {
-  margin: 0 0 6px !important;
+  margin: 0 0 4px !important;
   color: var(--ar-ink);
-  font-size: 30px !important;
+  font-size: 26px !important;
   line-height: 1.2 !important;
   letter-spacing: 0 !important;
 }
@@ -74,7 +74,7 @@ body,
 .ar-hero p {
   margin: 0 !important;
   color: var(--ar-muted);
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .ar-control-grid,
@@ -86,7 +86,7 @@ body,
 .ar-evidence-grid,
 .ar-download-grid {
   gap: 14px !important;
-  margin-top: 14px !important;
+  margin-top: 8px !important;
 }
 
 .ar-panel,
@@ -100,7 +100,7 @@ body,
 }
 
 .ar-panel {
-  padding: 14px !important;
+  padding: 10px !important;
 }
 
 .ar-upload-panel,
@@ -127,15 +127,15 @@ body,
   background: var(--ar-notice-bg);
   border-radius: 6px;
   padding: 8px 10px !important;
-  margin: 10px 0 !important;
+  margin: 6px 0 !important;
 }
 
 .ar-process-note {
   border: 1px solid var(--ar-line);
   background: var(--ar-process-bg);
   border-radius: 8px;
-  padding: 10px 12px !important;
-  margin-top: 14px !important;
+  padding: 8px 12px !important;
+  margin-top: 8px !important;
 }
 
 .ar-engineering {
@@ -145,13 +145,35 @@ body,
 }
 
 button.primary {
-  min-height: 46px !important;
+  min-height: 42px !important;
   border: 0 !important;
   border-radius: 7px !important;
   background: var(--ar-blue) !important;
   color: #fff !important;
   font-weight: 700 !important;
   box-shadow: 0 6px 16px rgba(31, 111, 178, 0.2);
+}
+
+button.primary.lg {
+  height: 44px !important;
+  min-height: 44px !important;
+  padding: 0 16px !important;
+}
+
+.ar-upload-panel button[aria-label="Drop an audio file here to upload"] {
+  min-height: 86px !important;
+  height: 86px !important;
+  padding: 8px !important;
+}
+
+.ar-settings-panel textarea {
+  min-height: 70px !important;
+  height: 70px !important;
+}
+
+.ar-settings-panel .form,
+.ar-upload-panel .form {
+  gap: 8px !important;
 }
 
 button.primary:hover {

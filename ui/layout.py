@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,96 @@ from .presenters import (
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CSS_PATH = ROOT_DIR / "ui" / "styles.css"
 
+REMOTE_HTML_PATTERNS = (
+    re.compile(
+        r"<script\b[^>]*\bsrc=[\"']https://cdnjs\.cloudflare\.com/ajax/libs/iframe-resizer/[^\"']+[\"'][^>]*>\s*</script>",
+        re.I,
+    ),
+    re.compile(
+        r"<link\b[^>]*\bhref=[\"']https://fonts\.(?:googleapis|gstatic)\.com[^\"']*[\"'][^>]*>",
+        re.I,
+    ),
+    re.compile(
+        r"<link\b[^>]*\bhref=[\"']https://fonts\.googleapis\.com/css2\?[^\"']*[\"'][^>]*>",
+        re.I,
+    ),
+)
+
 
 def _read_css() -> str:
     return CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
+
+
+def strip_remote_html_resources(html_text: str) -> str:
+    cleaned = html_text
+    for pattern in REMOTE_HTML_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned
+
+
+class OfflineHtmlResourceMiddleware:
+    """Remove Gradio default remote tags from HTML responses for offline demos."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start_message = None
+        should_filter = False
+        body_parts: list[bytes] = []
+
+        async def send_wrapper(message):
+            nonlocal start_message, should_filter
+            if message["type"] == "http.response.start":
+                start_message = dict(message)
+                headers = [
+                    (key.lower(), value)
+                    for key, value in start_message.get("headers", [])
+                ]
+                should_filter = any(
+                    key == b"content-type" and b"text/html" in value.lower()
+                    for key, value in headers
+                )
+                if not should_filter:
+                    await send(message)
+                return
+
+            if message["type"] != "http.response.body" or not should_filter:
+                await send(message)
+                return
+
+            body_parts.append(message.get("body", b""))
+            if message.get("more_body", False):
+                return
+
+            raw_body = b"".join(body_parts)
+            try:
+                filtered_text = strip_remote_html_resources(raw_body.decode("utf-8"))
+                filtered_body = filtered_text.encode("utf-8")
+            except UnicodeDecodeError:
+                filtered_body = raw_body
+
+            headers = [
+                (key, value)
+                for key, value in start_message.get("headers", [])
+                if key.lower() != b"content-length"
+            ]
+            headers.append((b"content-length", str(len(filtered_body)).encode("ascii")))
+            start_message["headers"] = headers
+            await send(start_message)
+            await send({**message, "body": filtered_body, "more_body": False})
+
+        await self.app(scope, receive, send_wrapper)
+
+
+def offline_launch_app_kwargs() -> dict[str, Any]:
+    from starlette.middleware import Middleware
+
+    return {"middleware": [Middleware(OfflineHtmlResourceMiddleware)]}
 
 
 def _first_fixture() -> str:
@@ -107,10 +195,16 @@ def build_demo():
     fixture_enabled = _fixture_mode_default()
     fixture_names = list_fixture_names() if fixture_enabled else []
     default_fixture = _first_fixture() if fixture_enabled else ""
+    theme = gr.themes.Base(
+        font=["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+        font_mono=["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+    )
 
     with gr.Blocks(
         css=_read_css(),
         title="听清又听懂·智能音频急救台",
+        theme=theme,
+        analytics_enabled=False,
         elem_classes=["ar-app"],
     ) as demo:
         gr.Markdown(
@@ -151,7 +245,7 @@ def build_demo():
                 )
                 reference_text = gr.Textbox(
                     label="参考台词（可选）",
-                    lines=4,
+                    lines=2,
                     placeholder="参考文本只传给 pipeline 计算 CER，禁止进入 Whisper prompt。",
                 )
                 with gr.Accordion("工程选项", open=False, elem_classes=["ar-engineering"]):

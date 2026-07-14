@@ -3,10 +3,19 @@ import re
 import sys
 import types
 import unittest
+from asyncio import run
 from unittest import mock
 
 from ui.presenters import UI_TUPLE_KEYS
-from ui.layout import CSS_PATH, _fixture_mode_default, _run, _run_real_pipeline, build_demo
+from ui.layout import (
+    CSS_PATH,
+    OfflineHtmlResourceMiddleware,
+    _fixture_mode_default,
+    _run,
+    _run_real_pipeline,
+    build_demo,
+    strip_remote_html_resources,
+)
 
 
 def _relative_luminance(color: str) -> float:
@@ -115,6 +124,7 @@ class LayoutSafetyTest(unittest.TestCase):
                 return self
 
         fake_gradio = types.SimpleNamespace(
+            themes=types.SimpleNamespace(Base=lambda *args, **kwargs: ("BaseTheme", args, kwargs)),
             Blocks=lambda *args, **kwargs: FakeComponent("Blocks", *args, **kwargs),
             Markdown=lambda *args, **kwargs: FakeComponent("Markdown", *args, **kwargs),
             Row=lambda *args, **kwargs: FakeComponent("Row", *args, **kwargs),
@@ -138,6 +148,10 @@ class LayoutSafetyTest(unittest.TestCase):
             demo = build_demo()
 
         self.assertEqual(demo.kind, "Blocks")
+        blocks_kwargs = calls[0][2]
+        self.assertFalse(blocks_kwargs["analytics_enabled"])
+        self.assertEqual(blocks_kwargs["theme"][0], "BaseTheme")
+        self.assertEqual(blocks_kwargs["theme"][2]["font"][0], "system-ui")
         labels = [str(kwargs.get("label", "")) for _, _, kwargs in calls]
         self.assertNotIn("开发专用：使用前端 fixture 假数据", labels)
         self.assertTrue(any(kind == "State" for kind, _, _ in calls))
@@ -162,6 +176,7 @@ class LayoutSafetyTest(unittest.TestCase):
                 return self
 
         fake_gradio = types.SimpleNamespace(
+            themes=types.SimpleNamespace(Base=lambda *args, **kwargs: ("BaseTheme", args, kwargs)),
             Blocks=lambda *args, **kwargs: FakeComponent("Blocks", *args, **kwargs),
             Markdown=lambda *args, **kwargs: FakeComponent("Markdown", *args, **kwargs),
             Row=lambda *args, **kwargs: FakeComponent("Row", *args, **kwargs),
@@ -186,6 +201,54 @@ class LayoutSafetyTest(unittest.TestCase):
 
         html_classes = [kwargs.get("elem_classes", []) for kind, _, kwargs in calls if kind == "HTML"]
         self.assertTrue(any("ar-status-panel" in classes for classes in html_classes))
+
+    def test_offline_html_filter_removes_gradio_remote_defaults(self) -> None:
+        html = """
+        <html><head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link href="https://fonts.gstatic.com" rel="preconnect" />
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro" />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/iframe-resizer/4.3.1/iframeResizer.contentWindow.min.js" async></script>
+        </head><body>ok</body></html>
+        """
+        filtered = strip_remote_html_resources(html)
+        self.assertNotIn("fonts.googleapis.com", filtered)
+        self.assertNotIn("fonts.gstatic.com", filtered)
+        self.assertNotIn("cdnjs.cloudflare.com", filtered)
+        self.assertIn("<body>ok</body>", filtered)
+
+    def test_offline_html_middleware_filters_html_response(self) -> None:
+        async def app(scope, receive, send):
+            body = (
+                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/iframe-resizer/4.3.1/'
+                b'iframeResizer.contentWindow.min.js"></script><main>ok</main>'
+            )
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"text/html; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        run(OfflineHtmlResourceMiddleware(app)({"type": "http"}, receive, send))
+        body = sent[-1]["body"].decode("utf-8")
+        self.assertNotIn("cdnjs.cloudflare.com", body)
+        self.assertIn("<main>ok</main>", body)
+        length_header = dict(sent[0]["headers"])[b"content-length"]
+        self.assertEqual(length_header, str(len(sent[-1]["body"])).encode("ascii"))
 
     def test_dark_theme_readability_contrast(self) -> None:
         css = CSS_PATH.read_text(encoding="utf-8")
