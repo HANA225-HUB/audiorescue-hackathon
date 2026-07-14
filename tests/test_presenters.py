@@ -295,6 +295,59 @@ class PresenterTests(unittest.TestCase):
         self.assertIn("ar-status-failed", rendered)
         self.assertIn("急救未完成", rendered)
 
+    def test_many_sensitive_names_do_not_reach_visible_text_or_staged_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            rendered_parts = []
+            for index in range(50):
+                source_name = f"SECRET_USER_take_{index:02d}.wav"
+                job_root = root / "outputs" / "safe_job" / f"SECRET_WORKSPACE_{index:02d}"
+                job_root.mkdir(parents=True, exist_ok=True)
+                original = job_root / source_name
+                mixed = job_root / f"SECRET_USER_mix_{index:02d}.wav"
+                full = job_root / f"SECRET_USER_full_{index:02d}.wav"
+                original.write_bytes(f"original-{index}".encode("ascii"))
+                mixed.write_bytes(f"mixed-{index}".encode("ascii"))
+                full.write_bytes(f"full-{index}".encode("ascii"))
+                result = {
+                    "job_id": "safe_job",
+                    "status": "success",
+                    "runtime": {"total_seconds": 1.0},
+                    "input_meta": {"source_name": source_name, "duration_seconds": 1.0},
+                    "original_audio_path": str(original),
+                    "mixed_output_path": str(mixed),
+                    "enhanced_audio_path": str(mixed),
+                    "full_output_path": str(full),
+                    "warnings": [],
+                    "events": [],
+                    "config_snapshot": {},
+                }
+                with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                    "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+                ):
+                    view = result_to_view(result)
+                rendered_parts.extend(
+                    str(view[key])
+                    for key in (
+                        "status_md",
+                        "input_md",
+                        "playback_note_md",
+                        "original_audio",
+                        "enhanced_audio",
+                        "mixed_download",
+                        "full_download",
+                    )
+                )
+
+            rendered = unquote("\n".join(rendered_parts))
+            self.assertNotIn("SECRET_USER", rendered)
+            self.assertNotIn("SECRET_WORKSPACE", rendered)
+            self.assertNotIn("outputs/safe_job", rendered)
+            self.assertEqual(rendered.count("original.wav"), 50)
+            self.assertEqual(rendered.count("mixed.wav"), 100)
+            self.assertEqual(rendered.count("full.wav"), 50)
+
 
 if __name__ == "__main__":
     unittest.main()

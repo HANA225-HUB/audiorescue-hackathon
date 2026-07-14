@@ -66,7 +66,12 @@ def resolve_allowed_file(
 
 
 def _is_session_dir(path: Path) -> bool:
-    return path.is_dir() and len(path.name) == 32 and all(char in "0123456789abcdef" for char in path.name)
+    return (
+        not path.is_symlink()
+        and path.is_dir()
+        and len(path.name) == 32
+        and all(char in "0123456789abcdef" for char in path.name)
+    )
 
 
 def cleanup_stale_staging(
@@ -140,7 +145,12 @@ def stage_files_for_gradio(
     session_dir = _prepare_session_dir(root)
     for role, source in resolved_by_role.items():
         destination = session_dir / _ROLE_FILENAMES[role]
-        shutil.copyfile(source, destination)
-        os.chmod(destination, 0o600)
+        try:
+            shutil.copyfile(source, destination)
+            os.chmod(destination, 0o600)
+        except OSError:
+            destination.unlink(missing_ok=True)
+            staged[role] = None
+            continue
         staged[role] = str(destination)
     return staged

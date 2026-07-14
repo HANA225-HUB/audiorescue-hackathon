@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote
 
 from ui.file_staging import cleanup_stale_staging, stage_files_for_gradio
@@ -65,6 +66,45 @@ class FileStagingTests(unittest.TestCase):
 
             self.assertIsNone(staged["original_audio"])
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink is not available on this platform")
+    def test_rejects_allowed_root_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            allowed_root = root / "allowed"
+            outside = root / "outside" / "outside.wav"
+            allowed_root.mkdir()
+            outside.parent.mkdir()
+            outside.write_bytes(b"outside")
+            link = allowed_root / "link.wav"
+            os.symlink(outside, link)
+
+            staged = stage_files_for_gradio(
+                {"original_audio": link},
+                allowed_roots=(allowed_root,),
+                base_dir=root,
+                staging_root=Path(stage_tmp) / "ui-stage",
+            )
+
+            self.assertIsNone(staged["original_audio"])
+
+    def test_rejects_relative_traversal_after_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            allowed_root = root / "allowed"
+            outside = root / "outside" / "SECRET_USER.wav"
+            allowed_root.mkdir()
+            outside.parent.mkdir()
+            outside.write_bytes(b"outside")
+
+            staged = stage_files_for_gradio(
+                {"original_audio": "allowed/../outside/SECRET_USER.wav"},
+                allowed_roots=(allowed_root,),
+                base_dir=root,
+                staging_root=Path(stage_tmp) / "ui-stage",
+            )
+
+            self.assertIsNone(staged["original_audio"])
+
     def test_cleanup_only_removes_stale_staging_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as stage_tmp:
             staging_root = Path(stage_tmp) / "ui-stage"
@@ -82,6 +122,136 @@ class FileStagingTests(unittest.TestCase):
             self.assertFalse(stale.exists())
             self.assertTrue(fresh.exists())
             self.assertTrue(unrelated.exists())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink is not available on this platform")
+    def test_cleanup_does_not_follow_malicious_session_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(stage_tmp)
+            staging_root = root / "ui-stage"
+            outside = root / "outside"
+            outside.mkdir()
+            protected = outside / "keep.txt"
+            protected.write_text("do-not-delete", encoding="utf-8")
+            staging_root.mkdir()
+            link = staging_root / ("a" * 32)
+            os.symlink(outside, link)
+
+            cleanup_stale_staging(staging_root=staging_root, ttl_seconds=60, now=time.time() + 7200)
+
+            self.assertTrue(link.exists())
+            self.assertTrue(protected.exists())
+            self.assertEqual(protected.read_text(encoding="utf-8"), "do-not-delete")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink is not available on this platform")
+    def test_cleanup_removes_nested_symlink_without_deleting_target(self) -> None:
+        with tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(stage_tmp)
+            staging_root = root / "ui-stage"
+            outside = root / "outside"
+            session = staging_root / ("b" * 32)
+            outside.mkdir()
+            session.mkdir(parents=True)
+            protected = outside / "keep.txt"
+            protected.write_text("do-not-delete", encoding="utf-8")
+            os.symlink(outside, session / "nested-link")
+            old_time = time.time() - 7200
+            os.utime(session, (old_time, old_time))
+
+            cleanup_stale_staging(staging_root=staging_root, ttl_seconds=3600)
+
+            self.assertFalse(session.exists())
+            self.assertTrue(protected.exists())
+            self.assertEqual(protected.read_text(encoding="utf-8"), "do-not-delete")
+
+    def test_isolates_consecutive_sessions_for_same_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            source = root / "allowed" / "SECRET_USER_same.wav"
+            source.parent.mkdir()
+            source.write_bytes(b"first")
+
+            first = stage_files_for_gradio(
+                {"original_audio": source},
+                allowed_roots=(source.parent,),
+                base_dir=root,
+                staging_root=staging_root,
+            )
+            source.write_bytes(b"second")
+            second = stage_files_for_gradio(
+                {"original_audio": source},
+                allowed_roots=(source.parent,),
+                base_dir=root,
+                staging_root=staging_root,
+            )
+
+            first_path = Path(first["original_audio"] or "")
+            second_path = Path(second["original_audio"] or "")
+            self.assertNotEqual(first_path.parent, second_path.parent)
+            self.assertEqual(first_path.name, "original.wav")
+            self.assertEqual(second_path.name, "original.wav")
+            self.assertEqual(first_path.read_bytes(), b"first")
+            self.assertEqual(second_path.read_bytes(), b"second")
+
+    def test_missing_directory_or_disappearing_sources_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            allowed_root = root / "allowed"
+            allowed_root.mkdir()
+            missing = allowed_root / "missing.wav"
+            directory = allowed_root / "directory.wav"
+            directory.mkdir()
+
+            staged = stage_files_for_gradio(
+                {"original_audio": missing, "mixed_audio": directory},
+                allowed_roots=(allowed_root,),
+                base_dir=root,
+                staging_root=Path(stage_tmp) / "ui-stage",
+            )
+
+            self.assertIsNone(staged["original_audio"])
+            self.assertIsNone(staged["mixed_audio"])
+
+    def test_copy_failure_fails_closed_without_source_path_in_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            source = root / "allowed" / "SECRET_USER_unreadable.wav"
+            source.parent.mkdir()
+            source.write_bytes(b"secret")
+
+            with mock.patch("ui.file_staging.shutil.copyfile", side_effect=OSError("copy denied")):
+                staged = stage_files_for_gradio(
+                    {"original_audio": source},
+                    allowed_roots=(source.parent,),
+                    base_dir=root,
+                    staging_root=Path(stage_tmp) / "ui-stage",
+                )
+
+            self.assertIsNone(staged["original_audio"])
+
+    def test_many_sensitive_source_names_do_not_appear_in_staged_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            exposed = []
+            for index in range(50):
+                sentinel = f"SECRET_USER_{index:02d}"
+                source = root / "outputs" / "job" / f"SECRET_WORKSPACE_{index:02d}" / f"{sentinel}.wav"
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(f"content-{index}".encode("ascii"))
+                staged = stage_files_for_gradio(
+                    {"original_audio": source},
+                    allowed_roots=(root / "outputs" / "job",),
+                    base_dir=root,
+                    staging_root=staging_root,
+                )
+                exposed.append(str(staged["original_audio"]))
+
+            decoded = unquote(" ".join(exposed))
+            self.assertNotIn("SECRET_USER", decoded)
+            self.assertNotIn("SECRET_WORKSPACE", decoded)
+            self.assertNotIn("outputs/job", decoded)
+            self.assertEqual(decoded.count("original.wav"), 50)
 
 
 if __name__ == "__main__":
