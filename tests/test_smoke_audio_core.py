@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import warnings
 import wave
+from urllib.parse import quote
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,7 @@ _POSIX_CACHE_MARKER = "/private/cache/alpha.wav"
 _WINDOWS_CACHE_MARKER = "C:/private/cache/beta.wav"
 _URL_MARKER = "https://example.test/audio.wav?token=secret"
 _CHINESE_TRANSCRIPT_MARKER = "\u4e2d\u6587\u8f6c\u5199\u6807\u8bb0"
+_CLI_SECRET_MARKER = "secret-cli-marker-\u4e2d\u6587-token"
 _LONG_FREE_TEXT = "free-text-" + ("x" * 2048)
 
 
@@ -105,7 +107,238 @@ def _fake_transcribe(audio_path: str, language: str = "zh", *, model_name: str, 
     )
 
 
+def _assert_marker_absent(testcase: unittest.TestCase, rendered: str, marker: str) -> None:
+    testcase.assertNotIn(marker, rendered)
+    encoded = quote(marker, safe="")
+    testcase.assertNotIn(encoded, rendered)
+    testcase.assertNotIn(quote(encoded, safe=""), rendered)
+
+
 class SmokeAudioCoreTest(unittest.TestCase):
+    def _invoke_smoke(self, args: list[str], *, patch_normalize: bool = False):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sys, "argv", ["smoke_audio_core.py", *args]))
+            if patch_normalize:
+                stack.enter_context(
+                    mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize)
+                )
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            code = smoke.main()
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _run_normalize_only_with_cli(self, args: list[str]):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "input.wav"
+            output_dir = temp / "outputs"
+            _write_pcm16_wav(input_wav)
+            code, stdout, stderr = self._invoke_smoke(
+                [
+                    "--input",
+                    str(input_wav),
+                    "--output-dir",
+                    str(output_dir),
+                    "--normalize-only",
+                    *args,
+                ],
+                patch_normalize=True,
+            )
+        return code, stdout, stderr, json.loads(stdout)
+
+    def test_asr_model_summary_uses_safe_label_without_cli_value_leak(self) -> None:
+        cases = [
+            ("base", "base", None),
+            (_POSIX_CACHE_MARKER, "custom", _POSIX_CACHE_MARKER),
+            (_WINDOWS_CACHE_MARKER, "custom", _WINDOWS_CACHE_MARKER),
+            (_URL_MARKER, "custom", _URL_MARKER),
+            (_CLI_SECRET_MARKER, "custom", _CLI_SECRET_MARKER),
+            (_LONG_FREE_TEXT, "custom", _LONG_FREE_TEXT[:80]),
+        ]
+        for value, expected_label, marker in cases:
+            with self.subTest(asr_model=value[:16]):
+                code, stdout, stderr, payload = self._run_normalize_only_with_cli(
+                    ["--asr-model", value]
+                )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                self.assertEqual(payload["asr_request"]["model"], expected_label)
+                self.assertEqual(payload["asr_request"]["device"], "auto")
+                if marker is not None:
+                    _assert_marker_absent(self, stdout, marker)
+
+    def test_device_summary_uses_safe_family_without_cli_value_leak(self) -> None:
+        cases = [
+            ("auto", "auto", None),
+            ("cpu", "cpu", None),
+            ("cuda", "cuda", None),
+            ("cuda:0", "cuda", None),
+            ("mps", "mps", None),
+            (_POSIX_CACHE_MARKER, "custom", _POSIX_CACHE_MARKER),
+            (_WINDOWS_CACHE_MARKER, "custom", _WINDOWS_CACHE_MARKER),
+            (_URL_MARKER, "custom", _URL_MARKER),
+            (_CLI_SECRET_MARKER, "custom", _CLI_SECRET_MARKER),
+            (_LONG_FREE_TEXT, "custom", _LONG_FREE_TEXT[:80]),
+        ]
+        for value, expected_label, marker in cases:
+            with self.subTest(device=value[:16]):
+                code, stdout, stderr, payload = self._run_normalize_only_with_cli(
+                    ["--device", value]
+                )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                self.assertEqual(payload["asr_request"]["model"], "base")
+                self.assertEqual(payload["asr_request"]["device"], expected_label)
+                if marker is not None:
+                    _assert_marker_absent(self, stdout, marker)
+
+    def test_custom_asr_values_do_not_leak_through_success_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "input.wav"
+            output_dir = temp / "outputs"
+            model_value = str(temp / f"{_CLI_SECRET_MARKER}.pt")
+            device_value = f"private-device-{_CLI_SECRET_MARKER}"
+            _write_pcm16_wav(input_wav)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            argv = [
+                "smoke_audio_core.py",
+                "--input",
+                str(input_wav),
+                "--output-dir",
+                str(output_dir),
+                "--asr-model",
+                model_value,
+                "--device",
+                device_value,
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize),
+                mock.patch.object(smoke, "enhance_audio", side_effect=_fake_enhance),
+                mock.patch.object(smoke, "transcribe_audio", side_effect=_fake_transcribe),
+                mock.patch.object(
+                    smoke,
+                    "get_enhancer_model_fingerprint",
+                    return_value={
+                        "model_name": "DeepFilterNet3",
+                        "checkpoint_path": "checkpoints/model_120.ckpt.best",
+                        "checkpoint_sha256": "a" * 64,
+                    },
+                ),
+                mock.patch.object(
+                    smoke,
+                    "get_asr_model_fingerprint",
+                    return_value={
+                        "model_name": f"whisper-{_CLI_SECRET_MARKER}",
+                        "device": device_value,
+                        "checkpoint_path": f"{_CLI_SECRET_MARKER}.pt",
+                        "checkpoint_sha256": "D" * 64,
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = smoke.main()
+
+        stdout_value = stdout.getvalue()
+        stderr_value = stderr.getvalue()
+        payload = json.loads(stdout_value)
+        rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr_value, "")
+        self.assertEqual(payload["asr_request"], {"model": "custom", "device": "custom"})
+        self.assertEqual(
+            payload["runs"][0]["model_fingerprints"]["asr"]["model_name"],
+            "whisper-custom",
+        )
+        self.assertEqual(
+            payload["runs"][0]["model_fingerprints"]["asr"]["checkpoint_path"],
+            "custom",
+        )
+        self.assertEqual(
+            payload["runs"][0]["transcript_before"]["model_name"],
+            "whisper-custom",
+        )
+        self.assertEqual(
+            payload["runs"][0]["transcript_after"]["model_name"],
+            "whisper-custom",
+        )
+        _assert_marker_absent(self, rendered, _CLI_SECRET_MARKER)
+
+    def test_parse_failures_return_single_safe_input_invalid_json(self) -> None:
+        cases = [
+            (["--unknown-arg", _CLI_SECRET_MARKER], "unknown_argument", _CLI_SECRET_MARKER),
+            (["--runs", _CLI_SECRET_MARKER], "invalid_value", _CLI_SECRET_MARKER),
+            (["--runs"], "missing_value", None),
+            (["--runs", "0"], "invalid_range", None),
+            (["--runs", "-1"], "invalid_range", None),
+        ]
+        for args, expected_reason, marker in cases:
+            with self.subTest(args=args[:1]):
+                code, stdout, stderr = self._invoke_smoke(args)
+                payload = json.loads(stdout)
+                rendered = json.dumps(payload, ensure_ascii=False)
+
+                self.assertEqual(code, 2)
+                self.assertEqual(stderr, "")
+                self.assertEqual(payload["runs"][0]["error"]["code"], "INPUT_INVALID")
+                self.assertEqual(
+                    payload["runs"][0]["error"]["message"],
+                    "input audio is invalid",
+                )
+                self.assertEqual(
+                    payload["runs"][0]["error"]["details"],
+                    {"category": "argument_parse", "reason": expected_reason},
+                )
+                self.assertNotIn("usage:", stdout.lower())
+                self.assertNotIn("Traceback", stdout)
+                if marker is not None:
+                    _assert_marker_absent(self, rendered, marker)
+
+    def test_cli_help_remains_static_argparse_output(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["smoke_audio_core.py", "--help", _CLI_SECRET_MARKER],
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                smoke.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("AudioRescue A-layer smoke test", stdout.getvalue())
+        self.assertNotIn(_CLI_SECRET_MARKER, stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_pre_run_boundary_does_not_swallow_system_exit(self) -> None:
+        argv = [
+            "smoke_audio_core.py",
+            "--input",
+            "unused.wav",
+            "--output-dir",
+            "unused_outputs",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(smoke, "_run_smoke", side_effect=SystemExit(7)),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                smoke.main()
+
+        self.assertEqual(raised.exception.code, 7)
+
     def test_smoke_runs_twice_and_prints_sanitized_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

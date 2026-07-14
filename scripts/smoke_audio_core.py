@@ -37,7 +37,32 @@ from core.transcribe import get_asr_model_fingerprint, transcribe_audio
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AudioRescue A-layer smoke test")
+    parser = _build_parser()
+    if _is_help_request(sys.argv[1:]):
+        parser.parse_args()
+        return 0
+
+    output_stream = sys.stdout
+    with _CliLogCapture() as log_capture:
+        try:
+            args = parser.parse_args()
+            if args.runs < 1:
+                raise _ArgumentParseError("invalid_range")
+            summary, exit_code = _run_smoke(args)
+        except _ArgumentParseError as exc:
+            summary = _argument_parse_error_summary(exc)
+            exit_code = 2
+        except Exception as exc:
+            summary = _pre_run_error_summary(exc)
+            exit_code = 2
+
+    summary["cli_log_capture"] = log_capture.summary()
+    _print_json(summary, stream=output_stream)
+    return exit_code
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _SafeArgumentParser(description="AudioRescue A-layer smoke test")
     parser.add_argument(
         "--input",
         default=str(ROOT / "tests" / "fixtures" / "dev_smoke_s01_fan.wav"),
@@ -75,22 +100,33 @@ def main() -> int:
         default="auto",
         help="Whisper device passed through the A-layer ASR contract",
     )
-    args = parser.parse_args()
+    return parser
 
-    if args.runs < 1:
-        parser.error("--runs must be at least 1")
 
-    output_stream = sys.stdout
-    with _CliLogCapture() as log_capture:
-        try:
-            summary, exit_code = _run_smoke(args)
-        except Exception as exc:
-            summary = _pre_run_error_summary(exc)
-            exit_code = 2
+class _ArgumentParseError(Exception):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__("argument parse failed")
 
-    summary["cli_log_capture"] = log_capture.summary()
-    _print_json(summary, stream=output_stream)
-    return exit_code
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _ArgumentParseError(_classify_argparse_error(message))
+
+
+def _classify_argparse_error(message: str) -> str:
+    normalized = str(message).lower()
+    if "unrecognized arguments" in normalized:
+        return "unknown_argument"
+    if "expected one argument" in normalized or "requires an argument" in normalized:
+        return "missing_value"
+    if "invalid" in normalized:
+        return "invalid_value"
+    return "parse_error"
+
+
+def _is_help_request(argv: list[str]) -> bool:
+    return any(item in {"-h", "--help"} for item in argv)
 
 
 def _pre_run_error_summary(exc: Exception) -> dict[str, Any]:
@@ -105,6 +141,32 @@ def _pre_run_error_summary(exc: Exception) -> dict[str, Any]:
                 "run_index": 0,
                 "run_kind": "pre_run",
                 "error": _unexpected_error_evidence(exc),
+                "cuda_after_run": _cuda_after_run(),
+            }
+        ],
+    }
+
+
+def _argument_parse_error_summary(exc: _ArgumentParseError) -> dict[str, Any]:
+    return {
+        "environment": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+        },
+        "runs": [
+            {
+                "run_index": 0,
+                "run_kind": "pre_run",
+                "error": {
+                    "code": "INPUT_INVALID",
+                    "message": _SAFE_ERROR_MESSAGES["INPUT_INVALID"],
+                    "module": "smoke_audio_core",
+                    "details": {
+                        "category": "argument_parse",
+                        "reason": exc.reason,
+                    },
+                },
                 "cuda_after_run": _cuda_after_run(),
             }
         ],
@@ -127,7 +189,10 @@ def _run_smoke(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "per_run_subdirectories": args.runs > 1,
         },
         "normalize_only": bool(args.normalize_only),
-        "asr_request": {"model": args.asr_model, "device": args.device},
+        "asr_request": {
+            "model": _safe_asr_model_label(args.asr_model),
+            "device": _safe_device_label(args.device),
+        },
         "runs": [],
     }
 
@@ -236,12 +301,24 @@ def _run_once(
         model_name=asr_model,
         device=device,
     )
-    run_payload["model_fingerprints"]["asr"] = get_asr_model_fingerprint(
-        asr_model,
-        device,
+    model_label = _safe_asr_model_label(asr_model)
+    device_label = _safe_device_label(device)
+    run_payload["model_fingerprints"]["asr"] = _safe_asr_fingerprint(
+        get_asr_model_fingerprint(
+            asr_model,
+            device,
+        ),
+        model_label=model_label,
+        device_label=device_label,
     )
-    run_payload["transcript_before"] = _transcript_evidence(before)
-    run_payload["transcript_after"] = _transcript_evidence(after)
+    run_payload["transcript_before"] = _transcript_evidence(
+        before,
+        model_label=model_label,
+    )
+    run_payload["transcript_after"] = _transcript_evidence(
+        after,
+        model_label=model_label,
+    )
     run_payload["mixed_inspection"] = inspect_audio(*_read_for_inspection(enhanced_mix))
     run_payload["cuda_after_run"] = _cuda_after_run()
     run_payload["run_seconds"] = time.perf_counter() - run_started
@@ -250,6 +327,96 @@ def _run_once(
 
 def _run_kind(run_index: int) -> str:
     return "cold" if run_index == 1 else "warm"
+
+
+_KNOWN_WHISPER_MODEL_LABELS = frozenset(
+    {
+        "tiny",
+        "tiny.en",
+        "base",
+        "base.en",
+        "small",
+        "small.en",
+        "medium",
+        "medium.en",
+        "large",
+        "large-v1",
+        "large-v2",
+        "large-v3",
+        "large-v3-turbo",
+        "turbo",
+    }
+)
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+
+def _safe_asr_model_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return "custom"
+    normalized = value.strip()
+    if normalized in _KNOWN_WHISPER_MODEL_LABELS:
+        return normalized
+    return "custom"
+
+
+def _safe_transcript_model_name(value: Any, model_label: str | None) -> str:
+    if model_label is not None:
+        return f"whisper-{model_label}" if model_label != "custom" else "whisper-custom"
+    if not isinstance(value, str):
+        return "whisper-custom"
+    normalized = value.strip()
+    prefix = "whisper-"
+    if normalized.startswith(prefix):
+        label = normalized[len(prefix) :]
+        if label in _KNOWN_WHISPER_MODEL_LABELS:
+            return normalized
+    if normalized in _KNOWN_WHISPER_MODEL_LABELS:
+        return f"whisper-{normalized}"
+    return "whisper-custom"
+
+
+def _safe_device_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return "custom"
+    normalized = value.strip().lower()
+    if normalized in {"auto", "cpu", "cuda", "mps"}:
+        return normalized
+    if normalized.startswith("cuda:") and normalized[5:].isdigit():
+        return "cuda"
+    return "custom"
+
+
+def _safe_asr_fingerprint(
+    value: Mapping[str, Any],
+    *,
+    model_label: str,
+    device_label: str,
+) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    if not isinstance(value, Mapping):
+        return safe
+    if "model_name" in value:
+        safe["model_name"] = (
+            f"whisper-{model_label}" if model_label != "custom" else "whisper-custom"
+        )
+    if "device" in value:
+        safe["device"] = device_label
+    if "checkpoint_path" in value:
+        safe["checkpoint_path"] = (
+            f"{model_label}.pt" if model_label != "custom" else "custom"
+        )
+    checkpoint_sha256 = value.get("checkpoint_sha256")
+    if _is_sha256_text(checkpoint_sha256):
+        safe["checkpoint_sha256"] = str(checkpoint_sha256).lower()
+    return safe
+
+
+def _is_sha256_text(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in _HEX_CHARS for char in value)
+    )
 
 
 def _probe_environment() -> dict[str, Any]:
@@ -318,14 +485,18 @@ def _audio_meta_evidence(meta: AudioMeta) -> dict[str, Any]:
     }
 
 
-def _transcript_evidence(transcript: TranscriptResult) -> dict[str, Any]:
+def _transcript_evidence(
+    transcript: TranscriptResult,
+    *,
+    model_label: str | None = None,
+) -> dict[str, Any]:
     return {
         "text_length": len(transcript.text),
         "text_nonempty": bool(transcript.text.strip()),
         "language": transcript.language,
         "segments_count": len(transcript.segments),
         "runtime_seconds": transcript.runtime_seconds,
-        "model_name": transcript.model_name,
+        "model_name": _safe_transcript_model_name(transcript.model_name, model_label),
         "error": transcript.error,
     }
 
