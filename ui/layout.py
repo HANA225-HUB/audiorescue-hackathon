@@ -108,14 +108,19 @@ def build_demo():
     fixture_names = list_fixture_names() if fixture_enabled else []
     default_fixture = _first_fixture() if fixture_enabled else ""
 
-    with gr.Blocks(css=_read_css(), title="听清又听懂·智能音频急救台") as demo:
+    with gr.Blocks(
+        css=_read_css(),
+        title="听清又听懂·智能音频急救台",
+        elem_classes=["ar-app"],
+    ) as demo:
         gr.Markdown(
             "# 听清又听懂·智能音频急救台\n"
-            "输入与设置 → 运行状态 → A/B 听感 → 双路转写 → 可视化 → 工程证据。"
+            "输入与设置 → 运行状态 → A/B 听感 → 双路转写 → 可视化 → 工程证据。",
+            elem_classes=["ar-hero"],
         )
 
-        with gr.Row(equal_height=True):
-            with gr.Column(scale=5):
+        with gr.Row(equal_height=True, elem_classes=["ar-control-grid"]):
+            with gr.Column(scale=5, elem_classes=["ar-panel", "ar-upload-panel"]):
                 if fixture_enabled:
                     use_fixture = gr.Checkbox(
                         value=True,
@@ -129,7 +134,8 @@ def build_demo():
                     )
                     gr.Markdown(
                         "开发联调样例仅验证链路，不作为比赛效果证据。"
-                        "正式演示请重新以默认环境启动。"
+                        "正式演示请重新以默认环境启动。",
+                        elem_classes=["ar-notice"],
                     )
                 else:
                     # Keep the callback signature stable without exposing a
@@ -137,7 +143,7 @@ def build_demo():
                     use_fixture = gr.State(False)
                     fixture = gr.State("")
                 input_file = gr.Audio(label="上传音频", type="filepath")
-            with gr.Column(scale=4):
+            with gr.Column(scale=4, elem_classes=["ar-panel", "ar-settings-panel"]):
                 strength = gr.Radio(
                     choices=["轻度", "标准", "强力"],
                     value="标准",
@@ -148,38 +154,82 @@ def build_demo():
                     lines=4,
                     placeholder="参考文本只传给 pipeline 计算 CER，禁止进入 Whisper prompt。",
                 )
-                force_recompute = gr.Checkbox(value=False, label="强制重算（工程选项，默认关闭）")
+                with gr.Accordion("工程选项", open=False, elem_classes=["ar-engineering"]):
+                    force_recompute = gr.Checkbox(value=False, label="强制重算")
                 run_button = gr.Button("开始急救", variant="primary")
 
-        gr.Markdown("点击后等待完整结果返回：规范化 → 增强 → 双轨转写 → 可视化。当前没有实时阶段回调。")
+        gr.Markdown(
+            "正在处理时：规范化 → 增强 → 双轨转写 → 可视化。当前没有实时阶段回调。",
+            elem_classes=["ar-process-note"],
+        )
 
-        status = gr.Markdown()
-        input_info = gr.Markdown()
-        playback_note = gr.Markdown()
+        with gr.Row(equal_height=True, elem_classes=["ar-result-grid"]):
+            status = gr.Markdown(elem_classes=["ar-panel", "ar-status-panel"])
+            input_info = gr.Markdown(elem_classes=["ar-panel", "ar-meta-panel"])
 
-        with gr.Row(equal_height=True):
-            original_audio = gr.Audio(label="处理前：标准化原轨", type="filepath")
-            enhanced_audio = gr.Audio(label="增强后：混合增强轨", type="filepath")
+        playback_note = gr.Markdown(elem_classes=["ar-panel", "ar-playback-note"])
 
-        with gr.Row(equal_height=True):
-            transcript_before = gr.Markdown()
-            transcript_after = gr.Markdown()
+        with gr.Row(equal_height=True, elem_classes=["ar-audio-grid"]):
+            original_audio = gr.Audio(
+                label="处理前：标准化原轨",
+                type="filepath",
+                interactive=False,
+                elem_classes=["ar-audio"],
+            )
+            enhanced_audio = gr.Audio(
+                label="增强后：混合增强轨",
+                type="filepath",
+                interactive=False,
+                elem_classes=["ar-audio"],
+            )
 
-        diff = gr.HTML(label="文本差异")
-        cer = gr.Markdown()
+        with gr.Row(equal_height=True, elem_classes=["ar-transcript-grid"]):
+            transcript_before = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
+            transcript_after = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
 
-        with gr.Row(equal_height=True):
-            spectrogram = gr.Image(label="声谱图对照", type="filepath")
-            waveform = gr.Image(label="波形对照", type="filepath")
+        with gr.Row(equal_height=True, elem_classes=["ar-analysis-grid"]):
+            with gr.Column(scale=5, elem_classes=["ar-panel", "ar-diff-panel"]):
+                gr.Markdown("### 文本差异", elem_classes=["ar-section-title"])
+                diff = gr.HTML()
+            cer = gr.Markdown(elem_classes=["ar-panel", "ar-cer-panel"])
 
-        runtime = gr.Markdown()
-        warnings = gr.HTML(label="警告与工程细节")
+        with gr.Row(equal_height=True, elem_classes=["ar-visual-grid"]):
+            spectrogram = gr.Image(
+                label="声谱图对照",
+                type="filepath",
+                interactive=False,
+                elem_classes=["ar-visual"],
+            )
+            waveform = gr.Image(
+                label="波形对照",
+                type="filepath",
+                interactive=False,
+                elem_classes=["ar-visual"],
+            )
 
-        with gr.Row():
-            mixed_download = gr.File(label="下载混合增强 WAV")
-            full_download = gr.File(label="下载 100% 增强 WAV")
-            transcript_download = gr.File(label="下载转写 TXT（待 pipeline 提供）")
-            result_download = gr.File(label="下载结果 JSON（待 pipeline 提供）")
+        with gr.Row(equal_height=True, elem_classes=["ar-evidence-grid"]):
+            runtime = gr.Markdown(elem_classes=["ar-panel", "ar-runtime-panel"])
+            with gr.Column(scale=1, elem_classes=["ar-panel", "ar-warning-panel"]):
+                gr.Markdown("### 警告与工程细节", elem_classes=["ar-section-title"])
+                warnings = gr.HTML()
+
+        with gr.Row(elem_classes=["ar-download-grid"]):
+            mixed_download = gr.File(
+                label="下载混合增强 WAV",
+                elem_classes=["ar-download"],
+            )
+            full_download = gr.File(
+                label="下载 100% 增强 WAV",
+                elem_classes=["ar-download"],
+            )
+            transcript_download = gr.File(
+                label="下载转写 TXT（待 pipeline 提供）",
+                elem_classes=["ar-download"],
+            )
+            result_download = gr.File(
+                label="下载结果 JSON（待 pipeline 提供）",
+                elem_classes=["ar-download"],
+            )
 
         outputs = [
             status,

@@ -1,7 +1,8 @@
 """B-owned Gradio entry point.
 
-The UI is fixture-first for offline development, and production mode calls only
-C's frozen `process_audio()` entry point.
+Production mode calls only C's frozen `process_audio()` entry point. Fixture
+mode is available only when the process explicitly opts in through
+`AUDIORESCUE_UI_FIXTURE`.
 """
 
 from __future__ import annotations
