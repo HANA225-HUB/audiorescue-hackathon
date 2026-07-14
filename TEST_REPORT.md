@@ -10,7 +10,7 @@
 | A backend / PR #8 | `9b5bea652c90d2067115501fdfb3708bdd8add3b` | Checks green at last A report |
 | B UI / PR #5 | `015d25bd149867ed558938adc81fb19c64260c61` | B012 reported checks green |
 | Collaboration docs / PR #7 | `934c44ba7a542c26af4af12c4567e59c5c237c04` | Separate docs PR; not modified here |
-| Final four-way combination | Pending | B013 is in progress; not yet accepted as final freeze |
+| Final four-way combination | B013 reported complete | No P0/P1 was reported in the final combination handoff; C review and freeze decision are still pending |
 
 ## Fixed Configuration
 
@@ -33,7 +33,7 @@
 | A007/A009 smoke CLI safety | Implemented in PR #8 | CLI stdout is one safe JSON document; normal stderr should be empty; ordinary fatal errors return fixed `INTERNAL_ERROR` evidence with a non-zero exit code. Do not publish raw logs. |
 | B012 file delivery | Reported complete by B | Client file delivery should use a controlled relative route with opaque IDs and neutral filenames; HEAD, GET, and Range are part of final validation. Do not publish token URLs. |
 | GPU supplement | Provisional | Server/GPU evidence is not counted as final accepted evidence until the router records explicit acceptance. |
-| Final combined tree | Pending | B013 must confirm the four candidate heads together before this report can say final combination passed. |
+| Final combined tree | Combination evidence available | B013 reported the four candidate heads combined without P0/P1 findings. This is not a final freeze claim until C review records the decision. |
 
 ## Public Automatic Test Log
 
@@ -42,7 +42,7 @@
 | 2026-07-14 | Historical C baseline | `python -m unittest discover -s tests -q` | Historical counts only; superseded by later PR checks |
 | 2026-07-14 | A backend PR #8 | PR checks | Reported 6/6 success at A009 handoff |
 | 2026-07-14 | B UI PR #5 | PR checks | Reported 6/6 success at B012 handoff |
-| 2026-07-14 | Final combination | B013 dispatch | In progress; no final pass claim yet |
+| 2026-07-14 | Final combination | B013 dispatch | Reported complete with no P0/P1; pending C review and freeze decision |
 
 ## Required Local Checks
 
@@ -63,8 +63,7 @@ python scripts/smoke_audio_core.py --runs 2 --asr-model base --device auto
 
 ## Still Required Before Final Freeze
 
-- B013 final four-way combination handoff.
-- C review of the combined tree and public report.
+- C review of the B013 combined tree and public report.
 - Offline rehearsal with fixture mode off.
 - Browser validation that external requests are zero.
 - Verification that delivered file URLs use only the controlled relative route.
