@@ -60,6 +60,7 @@ def make_row(
     is_locked = split in {"locked_test", "clean_control"}
     return {
         "sample_id": sample_id,
+        "dataset_version": "AudioRescue-CN-Mini-v1",
         "split": split,
         "source_type": source_type,
         "reference_text": f"参考文本-{sample_id}",
@@ -90,6 +91,14 @@ def make_split_rows(root: Path, split: str) -> list[dict[str, str]]:
     ]
 
 
+def make_full_manifest_rows(root: Path) -> list[dict[str, str]]:
+    return [
+        row
+        for split in EXPECTED_SPLIT_COUNTS
+        for row in make_split_rows(root, split)
+    ]
+
+
 def result_payload(
     status: str = "success",
     before: float | None = 0.5,
@@ -113,10 +122,11 @@ def write_freeze_record(
     schema_version: str = FREEZE_SCHEMA_VERSION,
     git_commit: str = FROZEN_COMMIT,
     config_sha256: str = FROZEN_CONFIG_SHA256,
+    dataset_version: str = "AudioRescue-CN-Mini-v1",
 ) -> None:
     payload = {
         "freeze_schema_version": schema_version,
-        "dataset_version": "AudioRescue-CN-Mini-v1",
+        "dataset_version": dataset_version,
         "contract_version": "v0.1-contract",
         "manifest": {
             "path": str(manifest.resolve()),
@@ -319,22 +329,71 @@ class EvaluationSelectionTest(unittest.TestCase):
             self.assertEqual(len(index["samples"]), 18)
             self.assertEqual(summary["sample_count"], 18)
 
-    def test_clean_control_uses_full_freeze_gate_but_is_repeatable(self) -> None:
+    def test_clean_control_requires_completed_locked_run_then_is_repeatable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "data_local"
             root.mkdir()
-            rows = make_split_rows(root, "clean_control")
+            rows = make_full_manifest_rows(root)
             manifest = root / "manifest.csv"
             write_manifest(manifest, rows)
             freeze = Path(temp_dir) / "frozen.json"
-            write_freeze_record(freeze, manifest)
+            config = Path(temp_dir) / "app.yaml"
+            config.write_text("audiorescue-clean-gate-config\n", encoding="utf-8")
+            selected_runtime = runtime_identity(
+                config_path=str(config),
+                config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
+            )
+            write_freeze_record(
+                freeze,
+                manifest,
+                config_sha256=selected_runtime.config_sha256,
+            )
             received: list[str] = []
+            receipt_root = Path(temp_dir) / "receipt-state"
 
             def fake_process(**kwargs: object) -> dict[str, object]:
                 received.append(str(kwargs["input_path"]))
                 return result_payload()
 
-            with mock.patch("scripts.run_evaluation._validate_full_dataset"):
+            with (
+                mock.patch(
+                    "scripts.run_evaluation.LOCKED_RECEIPT_ROOT",
+                    receipt_root,
+                ),
+                mock.patch("scripts.run_evaluation._validate_full_dataset"),
+                mock.patch(
+                    "scripts.run_evaluation._inspect_runtime_identity",
+                    return_value=selected_runtime,
+                ),
+                mock.patch(
+                    "core.pipeline.process_audio",
+                    side_effect=lambda **_: result_payload(),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    EvaluationError,
+                    "requires the same dataset's completed locked_test receipt",
+                ):
+                    run_evaluation(
+                        manifest_path=manifest,
+                        dataset_root=root,
+                        split="clean_control",
+                        output_dir=Path(temp_dir) / "clean_before_locked",
+                        frozen_config=freeze,
+                        runtime_identity=selected_runtime,
+                        process_callable=fake_process,
+                    )
+
+                run_evaluation(
+                    manifest_path=manifest,
+                    dataset_root=root,
+                    split="locked_test",
+                    output_dir=Path(temp_dir) / "locked_out",
+                    frozen_config=freeze,
+                    confirm_locked=True,
+                    force_recompute=True,
+                )
+
                 for run_number in (1, 2):
                     run_evaluation(
                         manifest_path=manifest,
@@ -342,12 +401,14 @@ class EvaluationSelectionTest(unittest.TestCase):
                         split="clean_control",
                         output_dir=Path(temp_dir) / f"clean_out_{run_number}",
                         frozen_config=freeze,
-                        runtime_identity=runtime_identity(),
+                        runtime_identity=selected_runtime,
                         process_callable=fake_process,
                     )
+                receipt_path = locked_receipt_path(freeze)
             self.assertEqual(len(received), 6)
             self.assertTrue(all("raw/clean" in path for path in received))
-            self.assertFalse(locked_receipt_path(freeze).exists())
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "complete")
 
     def test_dev_accepts_an_ordinary_json_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -379,9 +440,16 @@ class LockedEvaluationGuardTest(unittest.TestCase):
         self.base = Path(self.temporary.name)
         self.root = self.base / "data_local"
         self.root.mkdir()
-        self.rows = make_split_rows(self.root, "locked_test")
+        receipt_patch = mock.patch(
+            "scripts.run_evaluation.LOCKED_RECEIPT_ROOT",
+            self.base / "receipt-state",
+        )
+        receipt_patch.start()
+        self.addCleanup(receipt_patch.stop)
+        self.all_rows = make_full_manifest_rows(self.root)
+        self.rows = [row for row in self.all_rows if row["split"] == "locked_test"]
         self.manifest = self.root / "manifest.csv"
-        write_manifest(self.manifest, self.rows)
+        write_manifest(self.manifest, self.all_rows)
         self.freeze = self.base / "frozen.json"
         self.config = self.base / "app.yaml"
         self.config.write_text("audiorescue-test-config\n", encoding="utf-8")
@@ -447,6 +515,7 @@ class LockedEvaluationGuardTest(unittest.TestCase):
     def test_rejects_handwritten_minimal_freeze_without_validation_evidence(self) -> None:
         payload = {
             "freeze_schema_version": FREEZE_SCHEMA_VERSION,
+            "dataset_version": "AudioRescue-CN-Mini-v1",
             "manifest": {
                 "path": str(self.manifest),
                 "sha256": hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
@@ -503,6 +572,19 @@ class LockedEvaluationGuardTest(unittest.TestCase):
         self.assertEqual(summary["status_counts"]["success"], 9)
         self.assertEqual(receipt["status"], "complete")
         self.assertEqual(receipt["status_counts"]["success"], 9)
+        identity = receipt["locked_dataset"]["identity_payload"]
+        audit = receipt["locked_dataset"]["audit"]
+        self.assertEqual(audit["dataset_version"], "AudioRescue-CN-Mini-v1")
+        self.assertEqual(
+            audit["manifest_sha256"],
+            hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(len(identity["locked_samples"]), 9)
+        self.assertEqual(len(audit["reference_text_sha256"]), 9)
+        self.assertEqual(
+            receipt["locked_dataset"]["dataset_id"],
+            receipt_path.stem,
+        )
         self.assertEqual(len(receipt["evaluation_index"]["sha256"]), 64)
         self.assertEqual(len(receipt["summary"]["sha256"]), 64)
         with self.assertRaisesRegex(EvaluationError, "already been consumed"):
@@ -529,8 +611,144 @@ class LockedEvaluationGuardTest(unittest.TestCase):
                 output_dir=self.base / "copied-freeze-output",
             )
 
+    def test_new_code_config_and_freeze_still_hit_the_same_dataset_receipt(self) -> None:
+        self.write_freeze()
+        original_receipt = locked_receipt_path(self.freeze)
+        self.call()
+
+        new_config = self.base / "new-app.yaml"
+        new_config.write_text("new frozen pipeline config\n", encoding="utf-8")
+        new_runtime = runtime_identity(
+            git_commit="c" * 40,
+            config_path=str(new_config),
+            config_sha256=hashlib.sha256(new_config.read_bytes()).hexdigest(),
+        )
+        new_freeze = self.base / "new-code-config-freeze.json"
+        write_freeze_record(
+            new_freeze,
+            self.manifest,
+            git_commit=new_runtime.git_commit,
+            config_sha256=new_runtime.config_sha256,
+        )
+
+        self.assertEqual(locked_receipt_path(new_freeze), original_receipt)
+        with self.assertRaisesRegex(EvaluationError, "already been consumed"):
+            self.call(
+                frozen_config=new_freeze,
+                inspected_runtime=new_runtime,
+                output_dir=self.base / "new-code-config-output",
+            )
+
+    def test_receipt_key_only_changes_when_a_locked_audio_hash_changes(self) -> None:
+        self.write_freeze()
+        baseline = locked_receipt_path(self.freeze)
+
+        variants: list[tuple[str, list[dict[str, str]], str, bool]] = []
+        variants.append(
+            (
+                "row-order",
+                [dict(row) for row in reversed(self.all_rows)],
+                "AudioRescue-CN-Mini-v1",
+                False,
+            )
+        )
+        dev_changed = [dict(row) for row in self.all_rows]
+        next(row for row in dev_changed if row["split"] == "dev")[
+            "reference_text"
+        ] = "只修改开发集参考文本"
+        variants.append(
+            ("dev-row", dev_changed, "AudioRescue-CN-Mini-v1", False)
+        )
+        locked_reference_changed = [dict(row) for row in self.all_rows]
+        next(
+            row
+            for row in locked_reference_changed
+            if row["split"] == "locked_test"
+        )["reference_text"] = "只修改锁定集参考文本，不改变音频"
+        variants.append(
+            (
+                "locked-reference",
+                locked_reference_changed,
+                "AudioRescue-CN-Mini-v1",
+                False,
+            )
+        )
+        version_changed = [dict(row) for row in self.all_rows]
+        for row in version_changed:
+            row["dataset_version"] = "AudioRescue-CN-Mini-v2"
+        variants.append(
+            ("dataset-version", version_changed, "AudioRescue-CN-Mini-v2", False)
+        )
+        variants.append(
+            (
+                "csv-format",
+                [dict(row) for row in self.all_rows],
+                "AudioRescue-CN-Mini-v1",
+                True,
+            )
+        )
+
+        for name, rows, dataset_version, append_blank_line in variants:
+            with self.subTest(unchanged_locked_audio=name):
+                manifest = self.root / f"manifest-{name}.csv"
+                write_manifest(manifest, rows)
+                if append_blank_line:
+                    with manifest.open("a", encoding="utf-8") as handle:
+                        handle.write("\n")
+                freeze = self.base / f"freeze-{name}.json"
+                write_freeze_record(
+                    freeze,
+                    manifest,
+                    dataset_version=dataset_version,
+                )
+                self.assertEqual(locked_receipt_path(freeze), baseline)
+
+        locked_changed = [dict(row) for row in self.all_rows]
+        changed_row = next(
+            row for row in locked_changed if row["split"] == "locked_test"
+        )
+        changed_audio = self.root / changed_row["mixed_path"]
+        changed_audio.write_bytes(b"changed locked audio bytes")
+        changed_row["sha256"] = hashlib.sha256(changed_audio.read_bytes()).hexdigest()
+        changed_manifest = self.root / "manifest-locked-audio-changed.csv"
+        write_manifest(changed_manifest, locked_changed)
+        changed_freeze = self.base / "freeze-locked-audio-changed.json"
+        write_freeze_record(changed_freeze, changed_manifest)
+        self.assertNotEqual(locked_receipt_path(changed_freeze), baseline)
+
+    def test_started_receipt_blocks_locked_retry_and_clean_control(self) -> None:
+        self.write_freeze()
+
+        def interrupting_process(**_: object) -> dict[str, object]:
+            raise KeyboardInterrupt("simulated process interruption")
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.call(fake_process=interrupting_process)
+
+        receipt_path = locked_receipt_path(self.freeze)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "started")
+        with self.assertRaisesRegex(EvaluationError, "already been consumed"):
+            self.call(output_dir=self.base / "locked-retry-after-started")
+
+        with mock.patch("scripts.run_evaluation._validate_full_dataset"):
+            with self.assertRaisesRegex(
+                EvaluationError,
+                "requires a completed locked_test receipt.*started",
+            ):
+                run_evaluation(
+                    manifest_path=self.manifest,
+                    dataset_root=self.root,
+                    split="clean_control",
+                    output_dir=self.base / "clean-after-started",
+                    frozen_config=self.freeze,
+                    runtime_identity=self.runtime,
+                    process_callable=lambda **_: result_payload(),
+                )
+
     def test_manifest_change_during_validation_is_refused_before_receipt(self) -> None:
         self.write_freeze()
+        receipt_path = locked_receipt_path(self.freeze)
 
         def mutate_manifest(*_: object) -> None:
             with self.manifest.open("ab") as handle:
@@ -538,7 +756,7 @@ class LockedEvaluationGuardTest(unittest.TestCase):
 
         with self.assertRaisesRegex(EvaluationError, "manifest changed"):
             self.call(dataset_gate_side_effect=mutate_manifest)
-        self.assertFalse(locked_receipt_path(self.freeze).exists())
+        self.assertFalse(receipt_path.exists())
 
     def test_formal_locked_api_rejects_injected_test_hooks(self) -> None:
         self.write_freeze()
@@ -557,7 +775,7 @@ class LockedEvaluationGuardTest(unittest.TestCase):
 
     def test_hash_preflight_failure_does_not_consume(self) -> None:
         self.rows[-1]["sha256"] = "0" * 64
-        write_manifest(self.manifest, self.rows)
+        write_manifest(self.manifest, self.all_rows)
         self.write_freeze()
         with self.assertRaisesRegex(EvaluationError, "sha256 does not match"):
             self.call()

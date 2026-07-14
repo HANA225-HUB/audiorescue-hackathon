@@ -30,6 +30,7 @@ SPLITS = ("dev", "locked_test", "real", "clean_control")
 STATUSES = ("success", "partial", "failed")
 REQUIRED_MANIFEST_FIELDS = {
     "sample_id",
+    "dataset_version",
     "split",
     "source_type",
     "reference_text",
@@ -50,11 +51,15 @@ INTEGRITY_GATED_SPLITS = {"locked_test", "clean_control"}
 CER_TIE_TOLERANCE = 1e-12
 SCHEMA_VERSION = "audiorescue-evaluation-v1"
 FREEZE_SCHEMA_VERSION = "audiorescue-experiment-freeze-v2"
-RECEIPT_SCHEMA_VERSION = "audiorescue-locked-test-receipt-v1"
+RECEIPT_SCHEMA_VERSION = "audiorescue-locked-test-receipt-v2"
+LOCKED_DATASET_IDENTITY_VERSION = "audiorescue-locked-dataset-identity-v1"
 DATASET_VALIDATOR_ID = "scripts.validate_dataset.validate_dataset"
 DATASET_VALIDATOR_VERSION = "audiorescue-dataset-validator-v1"
 EXPECTED_DATASET_WAVS = 42
 EXPECTED_MANIFEST_ROWS = 33
+LOCKED_RECEIPT_ROOT = (
+    Path(__file__).resolve().parents[1] / "data_local" / ".locked_receipts"
+)
 
 
 class EvaluationError(RuntimeError):
@@ -90,7 +95,8 @@ class ManifestSnapshot:
 class FrozenIdentity:
     path: Path
     file_sha256: str
-    freeze_id: str
+    dataset_id: str
+    dataset_identity: Mapping[str, Any]
     receipt_path: Path
     payload: Mapping[str, Any]
 
@@ -113,6 +119,69 @@ def _is_hex_digest(value: Any, length: int) -> bool:
         and len(value) == length
         and all(character in "0123456789abcdefABCDEF" for character in value)
     )
+
+
+def _manifest_dataset_version(snapshot: ManifestSnapshot) -> str:
+    versions = {row.get("dataset_version", "").strip() for row in snapshot.rows}
+    if len(versions) != 1 or "" in versions:
+        raise EvaluationError(
+            "manifest must contain exactly one non-empty dataset_version"
+        )
+    return next(iter(versions))
+
+
+def _build_locked_dataset_identity(
+    *,
+    locked_samples: Sequence[tuple[str, str]],
+) -> tuple[str, dict[str, Any]]:
+    """Build the one-shot identity from data, never code/config/freeze bytes."""
+
+    normalized: dict[str, str] = {}
+    for sample_id, audio_sha256 in locked_samples:
+        if not isinstance(sample_id, str) or not sample_id:
+            raise EvaluationError("locked dataset identity contains an empty sample_id")
+        if sample_id in normalized:
+            raise EvaluationError(
+                f"locked dataset identity contains duplicate sample_id {sample_id!r}"
+            )
+        if not _is_hex_digest(audio_sha256, 64):
+            raise EvaluationError(
+                f"locked sample {sample_id!r} audio sha256 is invalid"
+            )
+        normalized[sample_id] = audio_sha256.lower()
+
+    expected_ids = set(_canonical_primary_paths("locked_test"))
+    if set(normalized) != expected_ids:
+        missing = sorted(expected_ids - set(normalized))
+        unexpected = sorted(set(normalized) - expected_ids)
+        raise EvaluationError(
+            "locked dataset identity must contain the canonical 9 samples; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    canonical_samples = [
+        {
+            "sample_id": sample_id,
+            "audio_sha256": normalized[sample_id],
+        }
+        for sample_id in sorted(normalized)
+    ]
+    identity = {
+        "identity_schema_version": LOCKED_DATASET_IDENTITY_VERSION,
+        "locked_samples": canonical_samples,
+    }
+    # The one-shot key intentionally excludes manifest formatting/hash,
+    # dataset_version, references, Git, config, and freeze representation.
+    dataset_id = hashlib.sha256(
+        json.dumps(
+            canonical_samples,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return dataset_id, identity
 
 
 def _inspect_runtime_identity() -> RuntimeIdentity:
@@ -180,6 +249,8 @@ def _validate_frozen_config(
     *,
     manifest_sha256: str,
     manifest_path: Path,
+    manifest_dataset_version: str,
+    locked_samples: Sequence[tuple[str, str]],
     dataset_root: Path,
     requested_strength: float,
     runtime_identity: RuntimeIdentity | None,
@@ -210,6 +281,14 @@ def _validate_frozen_config(
         if parsed_config.get("freeze_schema_version") != FREEZE_SCHEMA_VERSION:
             raise EvaluationError(
                 f"locked freeze_schema_version must be {FREEZE_SCHEMA_VERSION!r}"
+            )
+        frozen_dataset_version = parsed_config.get("dataset_version")
+        if (
+            not isinstance(frozen_dataset_version, str)
+            or frozen_dataset_version != manifest_dataset_version
+        ):
+            raise EvaluationError(
+                "locked freeze dataset_version does not match the manifest"
             )
 
         frozen_manifest = parsed_config.get("manifest")
@@ -361,30 +440,15 @@ def _validate_frozen_config(
                 "locked freeze config.processing.asr.initial_prompt must be null"
             )
 
-        identity_payload = {
-            "freeze_schema_version": FREEZE_SCHEMA_VERSION,
-            "dataset_version": parsed_config.get("dataset_version"),
-            "contract_version": parsed_config.get("contract_version"),
-            "git_commit": str(frozen_commit).lower(),
-            "config_sha256": str(frozen_config_hash).lower(),
-            "manifest_sha256": str(frozen_manifest_hash).lower(),
-            "locked_sample_ids": expected_locked_ids,
-            "dataset_validation": expected_validation,
-        }
-        freeze_id = hashlib.sha256(
-            json.dumps(
-                identity_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        receipt_path = dataset_root / ".locked_receipts" / f"{freeze_id}.json"
+        dataset_id, dataset_identity = _build_locked_dataset_identity(
+            locked_samples=locked_samples,
+        )
+        receipt_path = LOCKED_RECEIPT_ROOT / f"{dataset_id}.json"
         return FrozenIdentity(
             path=path,
             file_sha256=hashlib.sha256(raw_bytes).hexdigest(),
-            freeze_id=freeze_id,
+            dataset_id=dataset_id,
+            dataset_identity=dataset_identity,
             receipt_path=receipt_path,
             payload=parsed_config,
         )
@@ -720,7 +784,7 @@ def _validate_output_dir(output_dir: Path, overwrite: bool) -> None:
 
 
 def locked_receipt_path(frozen_config: str | Path) -> Path:
-    """Return the canonical receipt path independent of freeze filename/formatting."""
+    """Derive the data-only receipt path from a freeze and its frozen manifest."""
 
     freeze_path = Path(frozen_config).expanduser().resolve()
     try:
@@ -728,49 +792,35 @@ def locked_receipt_path(frozen_config: str | Path) -> Path:
         if not isinstance(payload, Mapping):
             raise TypeError("freeze root is not an object")
         manifest = payload["manifest"]
-        config = payload["config"]
-        git = payload["git"]
-        validation = payload["dataset_validation"]
-        if not all(
-            isinstance(section, Mapping)
-            for section in (manifest, config, git, validation)
-        ):
+        if not isinstance(manifest, Mapping):
             raise TypeError("freeze sections are not objects")
-        identity_payload = {
-            "freeze_schema_version": payload["freeze_schema_version"],
-            "dataset_version": payload["dataset_version"],
-            "contract_version": payload["contract_version"],
-            "git_commit": str(git["commit"]).lower(),
-            "config_sha256": str(config["sha256"]).lower(),
-            "manifest_sha256": str(manifest["sha256"]).lower(),
-            "locked_sample_ids": sorted(manifest["locked_sample_ids"]),
-            "dataset_validation": {
-                key: validation[key]
-                for key in (
-                    "validator_id",
-                    "validator_version",
-                    "checked_wavs",
-                    "expected_wavs",
-                    "manifest_rows",
-                    "hashes_verified",
-                )
-            },
-        }
-        freeze_id = hashlib.sha256(
-            json.dumps(
-                identity_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ).hexdigest()
         manifest_path = Path(str(manifest["path"])).expanduser().resolve()
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        snapshot = _read_manifest_snapshot(manifest_path)
+        manifest_sha256 = str(manifest["sha256"]).lower()
+        if snapshot.sha256 != manifest_sha256:
+            raise EvaluationError("freeze manifest sha256 does not match manifest bytes")
+        manifest_dataset_version = _manifest_dataset_version(snapshot)
+        if payload["dataset_version"] != manifest_dataset_version:
+            raise EvaluationError("freeze dataset_version does not match manifest")
+        locked_rows = _load_split_rows(snapshot, "locked_test")
+        dataset_id, _ = _build_locked_dataset_identity(
+            locked_samples=[
+                (row["sample_id"], row.get("sha256", "")) for row in locked_rows
+            ],
+        )
+    except (
+        EvaluationError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         raise EvaluationError(
             f"cannot derive canonical locked receipt from {freeze_path}: {exc}"
         ) from exc
-    return manifest_path.parent / ".locked_receipts" / f"{freeze_id}.json"
+    return LOCKED_RECEIPT_ROOT / f"{dataset_id}.json"
 
 
 def _write_started_receipt(path: Path, payload: Mapping[str, Any]) -> None:
@@ -801,6 +851,39 @@ def _write_started_receipt(path: Path, payload: Mapping[str, Any]) -> None:
     except OSError as exc:
         # Never unlink: once O_EXCL succeeds, this one-shot attempt is consumed.
         raise EvaluationError(f"cannot persist started receipt {path}: {exc}") from exc
+
+
+def _require_completed_locked_receipt(identity: FrozenIdentity) -> None:
+    path = identity.receipt_path
+    if not path.is_file():
+        raise EvaluationError(
+            "clean_control requires the same dataset's completed locked_test receipt"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        json.dumps(payload, allow_nan=False)
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise EvaluationError(f"locked_test receipt is invalid: {path}: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise EvaluationError(f"locked_test receipt is not a JSON object: {path}")
+    if payload.get("receipt_schema_version") != RECEIPT_SCHEMA_VERSION:
+        raise EvaluationError(
+            f"locked_test receipt schema must be {RECEIPT_SCHEMA_VERSION!r}"
+        )
+    locked_dataset = payload.get("locked_dataset")
+    if not isinstance(locked_dataset, Mapping):
+        raise EvaluationError("locked_test receipt has no locked_dataset identity")
+    if locked_dataset.get("dataset_id") != identity.dataset_id:
+        raise EvaluationError("locked_test receipt dataset identity does not match")
+    if locked_dataset.get("identity_payload") != dict(identity.dataset_identity):
+        raise EvaluationError("locked_test receipt identity payload does not match")
+    if payload.get("split") != "locked_test":
+        raise EvaluationError("locked_test receipt split is invalid")
+    if payload.get("status") != "complete":
+        raise EvaluationError(
+            "clean_control requires a completed locked_test receipt; "
+            f"found status {payload.get('status')!r}"
+        )
 
 
 def _json_clone(value: Any) -> Any:
@@ -1009,11 +1092,22 @@ def run_evaluation(
     _ensure_private_output(root, destination)
 
     manifest_snapshot = _read_manifest_snapshot(manifest)
+    manifest_dataset_version = _manifest_dataset_version(manifest_snapshot)
     rows = _load_split_rows(manifest_snapshot, split)
     manifest_sha256 = manifest_snapshot.sha256
     prepared_samples = _prepare_samples(rows, root, split)
     current_runtime: RuntimeIdentity | None = None
+    locked_identity_samples: list[tuple[str, str]] = []
     if split in INTEGRITY_GATED_SPLITS:
+        locked_rows = _load_split_rows(manifest_snapshot, "locked_test")
+        locked_prepared = (
+            prepared_samples
+            if split == "locked_test"
+            else _prepare_samples(locked_rows, root, "locked_test")
+        )
+        locked_identity_samples = [
+            (sample.row["sample_id"], sample.sha256) for sample in locked_prepared
+        ]
         _validate_full_dataset(root, manifest)
         current_runtime = (
             _inspect_runtime_identity()
@@ -1026,6 +1120,8 @@ def run_evaluation(
         confirm_locked,
         manifest_sha256=manifest_sha256,
         manifest_path=manifest,
+        manifest_dataset_version=manifest_dataset_version,
+        locked_samples=locked_identity_samples,
         dataset_root=root,
         requested_strength=strength,
         runtime_identity=current_runtime,
@@ -1033,14 +1129,18 @@ def run_evaluation(
     _validate_output_dir(destination, overwrite)
 
     receipt_path: Path | None = None
-    if split == "locked_test":
+    if split in INTEGRITY_GATED_SPLITS:
         if not isinstance(frozen_identity, FrozenIdentity):  # pragma: no cover
-            raise EvaluationError("locked_test freeze identity is incomplete")
-        receipt_path = frozen_identity.receipt_path
-        if receipt_path.exists():
+            raise EvaluationError("integrity-gated freeze identity is incomplete")
+        if split == "locked_test":
+            receipt_path = frozen_identity.receipt_path
+        if split == "locked_test" and frozen_identity.receipt_path.exists():
             raise EvaluationError(
-                f"locked_test freeze record has already been consumed: {receipt_path}"
+                "locked_test dataset has already been consumed: "
+                f"{frozen_identity.receipt_path}"
             )
+        if split == "clean_control":
+            _require_completed_locked_receipt(frozen_identity)
 
     # Delayed import keeps manifest/unit-test tooling usable without model deps.
     if process_callable is None:
@@ -1081,14 +1181,18 @@ def run_evaluation(
         frozen_public_identity: dict[str, str] | None = {
             "path": str(frozen_identity.path),
             "sha256": frozen_identity.file_sha256,
-            "freeze_id": frozen_identity.freeze_id,
+            "locked_dataset_id": frozen_identity.dataset_id,
             "receipt_path": str(frozen_identity.receipt_path),
         }
     else:
         frozen_public_identity = frozen_identity
 
     generated_at = _utc_now()
-    manifest_identity = {"path": str(manifest), "sha256": manifest_sha256}
+    manifest_identity = {
+        "path": str(manifest),
+        "sha256": manifest_sha256,
+        "dataset_version": manifest_dataset_version,
+    }
     started_receipt: dict[str, Any] | None = None
     if receipt_path is not None:
         if current_runtime is None or frozen_public_identity is None:  # pragma: no cover
@@ -1101,7 +1205,23 @@ def run_evaluation(
             "freeze": {
                 "path": frozen_public_identity["path"],
                 "sha256": frozen_public_identity["sha256"],
-                "freeze_id": frozen_public_identity["freeze_id"],
+            },
+            "locked_dataset": {
+                "dataset_id": frozen_identity.dataset_id,
+                "identity_payload": dict(frozen_identity.dataset_identity),
+                "audit": {
+                    "dataset_version": manifest_dataset_version,
+                    "manifest_sha256": manifest_sha256,
+                    "reference_text_sha256": {
+                        sample.row["sample_id"]: hashlib.sha256(
+                            sample.row["reference_text"].encode("utf-8")
+                        ).hexdigest()
+                        for sample in sorted(
+                            prepared_samples,
+                            key=lambda item: item.row["sample_id"],
+                        )
+                    },
+                },
             },
             "manifest": manifest_identity,
             "runtime": {
