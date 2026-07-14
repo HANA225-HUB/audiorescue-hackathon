@@ -37,6 +37,22 @@ class _FakeEnhancer:
         _write_pcm16_wav(Path(output_full_wav), self._wet_samples)
 
 
+class _OverlappingEnhancer(_FakeEnhancer):
+    def __init__(self, wet_samples: np.ndarray) -> None:
+        super().__init__(wet_samples)
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    def enhance_file(self, input_wav: str, output_full_wav: str) -> None:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            time.sleep(0.02)
+            super().enhance_file(input_wav, output_full_wav)
+        finally:
+            self.active_calls -= 1
+
+
 class EnhancementContractTest(unittest.TestCase):
     def test_enhance_audio_writes_full_and_mixed_outputs_with_strength(self) -> None:
         from core import enhance
@@ -164,29 +180,37 @@ class EnhancementContractTest(unittest.TestCase):
     def test_load_enhancer_singleton_is_thread_safe(self) -> None:
         from core import enhance
 
-        loaded_backend = object()
-        load_calls: list[str | None] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            (model_dir / "config.ini").write_bytes(b"config")
+            (checkpoint_dir / "model_120.ckpt.best").write_bytes(b"checkpoint")
 
-        def fake_backend(model_dir: str | None):
-            load_calls.append(model_dir)
-            time.sleep(0.02)
-            return loaded_backend
+            loaded_backend = object()
+            load_calls: list[str | None] = []
 
-        with (
-            mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
-            mock.patch.object(enhance, "_ENHANCER_MODEL_DIR", None),
-            mock.patch.object(
-                enhance, "_DeepFilterNetBackend", side_effect=fake_backend
-            ),
-        ):
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                backends = list(
-                    executor.map(
-                        lambda _: enhance.load_enhancer("model-dir"), range(8)
+            def fake_backend(model_dir_arg: str | None, *, fingerprint=None):
+                load_calls.append(model_dir_arg)
+                time.sleep(0.02)
+                return loaded_backend
+
+            with (
+                mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
+                mock.patch.object(enhance, "_ENHANCER_MODEL_DIR", None),
+                mock.patch.object(enhance, "_ENHANCER_CACHE_IDENTITY", None),
+                mock.patch.object(
+                    enhance, "_DeepFilterNetBackend", side_effect=fake_backend
+                ),
+            ):
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    backends = list(
+                        executor.map(
+                            lambda _: enhance.load_enhancer(str(model_dir)), range(8)
+                        )
                     )
-                )
 
-        self.assertEqual(load_calls, ["model-dir"])
+        self.assertEqual(load_calls, [str(model_dir)])
         self.assertTrue(all(backend is loaded_backend for backend in backends))
 
     def test_enhancer_fingerprint_reports_sanitized_config_and_checkpoint_hashes(self) -> None:
@@ -246,6 +270,25 @@ class EnhancementContractTest(unittest.TestCase):
         backend_loader.assert_not_called()
         self.assertIsNone(enhance._ENHANCER_BACKEND)
 
+    def test_enhancer_empty_expected_hash_fails_closed(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            (model_dir / "config.ini").write_bytes(b"config")
+            (checkpoint_dir / "model_120.ckpt.best").write_bytes(b"checkpoint")
+
+            with self.assertRaises(EnhancementError):
+                enhance.verify_enhancer_model_fingerprint(
+                    {
+                        "config_sha256": "",
+                        "checkpoint_sha256": sha256(b"checkpoint").hexdigest(),
+                    },
+                    str(model_dir),
+                )
+
     def test_enhancer_correct_fingerprint_does_not_force_duplicate_load(self) -> None:
         from core import enhance
 
@@ -258,7 +301,7 @@ class EnhancementContractTest(unittest.TestCase):
             loaded_backend = object()
             load_calls: list[str | None] = []
 
-            def fake_backend(model_dir_arg: str | None):
+            def fake_backend(model_dir_arg: str | None, fingerprint=None):
                 load_calls.append(model_dir_arg)
                 return loaded_backend
 
@@ -275,11 +318,70 @@ class EnhancementContractTest(unittest.TestCase):
                 first = enhance.load_enhancer(
                     str(model_dir), expected_fingerprint=expected
                 )
-                second = enhance.load_enhancer(str(model_dir))
+                second = enhance.load_enhancer(
+                    str(model_dir), expected_fingerprint=expected
+                )
 
         self.assertIs(first, loaded_backend)
         self.assertIs(second, loaded_backend)
         self.assertEqual(load_calls, [str(model_dir)])
+
+    def test_enhancer_reloads_when_checkpoint_changes_on_disk(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            (model_dir / "config.ini").write_bytes(b"config")
+            checkpoint = checkpoint_dir / "model_120.ckpt.best"
+            checkpoint.write_bytes(b"checkpoint-v1")
+            loaded_backends = [object(), object()]
+            load_calls: list[dict | None] = []
+
+            def fake_backend(model_dir_arg: str | None, fingerprint=None):
+                load_calls.append(fingerprint)
+                return loaded_backends[len(load_calls) - 1]
+
+            with (
+                mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
+                mock.patch.object(enhance, "_ENHANCER_CACHE_IDENTITY", None),
+                mock.patch.object(
+                    enhance, "_DeepFilterNetBackend", side_effect=fake_backend
+                ),
+            ):
+                first = enhance.load_enhancer(str(model_dir))
+                checkpoint.write_bytes(b"checkpoint-v2")
+                second = enhance.load_enhancer(str(model_dir))
+
+        self.assertIs(first, loaded_backends[0])
+        self.assertIs(second, loaded_backends[1])
+        self.assertEqual(len(load_calls), 2)
+
+    def test_enhance_audio_serializes_backend_inference(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            samples = np.full(48_000, 0.2, dtype=np.float32)
+            backend = _OverlappingEnhancer(samples)
+            inputs = []
+            for index in range(2):
+                input_wav = temp / f"original_{index}.wav"
+                _write_pcm16_wav(input_wav, samples)
+                inputs.append(
+                    (
+                        str(input_wav),
+                        str(temp / f"full_{index}.wav"),
+                        str(temp / f"mix_{index}.wav"),
+                    )
+                )
+
+            with mock.patch.object(enhance, "load_enhancer", return_value=backend):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    list(executor.map(lambda args: enhance.enhance_audio(*args), inputs))
+
+        self.assertEqual(backend.max_active_calls, 1)
 
 
 if __name__ == "__main__":
