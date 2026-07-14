@@ -1,9 +1,11 @@
 import contextlib
 import io
 import json
+import logging
 import sys
 import tempfile
 import unittest
+import warnings
 import wave
 from pathlib import Path
 from unittest import mock
@@ -13,6 +15,12 @@ import numpy as np
 from core.schemas import AudioMeta, TranscriptResult
 from core.schemas import EnhancementError
 from scripts import smoke_audio_core as smoke
+
+_POSIX_CACHE_MARKER = "/private/cache/alpha.wav"
+_WINDOWS_CACHE_MARKER = "C:/private/cache/beta.wav"
+_URL_MARKER = "https://example.test/audio.wav?token=secret"
+_CHINESE_TRANSCRIPT_MARKER = "\u4e2d\u6587\u8f6c\u5199\u6807\u8bb0"
+_LONG_FREE_TEXT = "free-text-" + ("x" * 2048)
 
 
 def _write_pcm16_wav(path: Path, amplitude: float = 0.1) -> None:
@@ -45,6 +53,17 @@ def _fake_normalize(input_path: str, output_path: str) -> AudioMeta:
     )
 
 
+def _noisy_fake_normalize(input_path: str, output_path: str) -> AudioMeta:
+    print(f"stdout leak {_POSIX_CACHE_MARKER} {_CHINESE_TRANSCRIPT_MARKER} {_LONG_FREE_TEXT}")
+    print(f"stderr leak {_WINDOWS_CACHE_MARKER} transcript marker", file=sys.stderr)
+    warnings.warn(
+        f"warning leak /private/model.pt {_CHINESE_TRANSCRIPT_MARKER}",
+        UserWarning,
+    )
+    logging.getLogger("audiorescue.noisy").warning("logging leak %s", _URL_MARKER)
+    return _fake_normalize(input_path, output_path)
+
+
 def _fake_enhance(input_wav: str, output_full_wav: str, output_mix_wav: str, strength: float):
     _write_pcm16_wav(Path(output_full_wav), amplitude=0.2)
     _write_pcm16_wav(Path(output_mix_wav), amplitude=0.15)
@@ -56,6 +75,23 @@ def _fake_enhance(input_wav: str, output_full_wav: str, output_mix_wav: str, str
         "model_name": "fake-deepfilternet3",
         "warnings": [],
     }
+
+
+def _noisy_enhance_error(*_args, **_kwargs):
+    print(f"enhance stdout leak {_POSIX_CACHE_MARKER} {_CHINESE_TRANSCRIPT_MARKER}")
+    print(f"enhance stderr leak {_WINDOWS_CACHE_MARKER} {_LONG_FREE_TEXT}", file=sys.stderr)
+    warnings.warn(f"enhance warning leak {_URL_MARKER}", RuntimeWarning)
+    logging.getLogger("audiorescue.noisy").error("enhance logging leak %s", _URL_MARKER)
+    raise EnhancementError(
+        "backend unavailable: private transcript must not be printed",
+        details={
+            "stage": "enhance",
+            "exception_type": "RuntimeError",
+            "path": "C:/private/cache/source.wav",
+            "message": _CHINESE_TRANSCRIPT_MARKER,
+            "url": _URL_MARKER,
+        },
+    )
 
 
 def _fake_transcribe(audio_path: str, language: str = "zh", *, model_name: str, device: str):
@@ -240,6 +276,7 @@ class SmokeAudioCoreTest(unittest.TestCase):
             output_dir = temp / "private_outputs"
             _write_pcm16_wav(input_wav)
             stdout = io.StringIO()
+            stderr = io.StringIO()
             argv = [
                 "smoke_audio_core.py",
                 "--input",
@@ -259,8 +296,9 @@ class SmokeAudioCoreTest(unittest.TestCase):
             with (
                 mock.patch.object(sys, "argv", argv),
                 mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize),
-                mock.patch.object(smoke, "enhance_audio", side_effect=error),
+                mock.patch.object(smoke, "enhance_audio", side_effect=_noisy_enhance_error),
                 contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
             ):
                 code = smoke.main()
 
@@ -268,12 +306,141 @@ class SmokeAudioCoreTest(unittest.TestCase):
             rendered = json.dumps(payload, ensure_ascii=False)
 
         self.assertEqual(code, 2)
+        self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(payload["runs"][0]["error"]["code"], "ENHANCE_FAILED")
         self.assertEqual(payload["runs"][0]["error"]["message"], "enhancement failed")
         self.assertEqual(payload["runs"][0]["error"]["details"]["path"], "<redacted>")
+        self.assertIn("cli_log_capture", payload)
+        self.assertGreater(payload["cli_log_capture"]["stdout_lines"], 0)
+        self.assertGreater(payload["cli_log_capture"]["stderr_lines"], 0)
+        self.assertGreater(payload["cli_log_capture"]["warning_count"], 0)
+        self.assertGreater(payload["cli_log_capture"]["logging_count"], 0)
+        self.assertNotIn(_CHINESE_TRANSCRIPT_MARKER, rendered)
+        self.assertNotIn(_LONG_FREE_TEXT[:80], rendered)
+        self.assertNotIn("example.test", rendered)
         self.assertNotIn("private transcript", rendered)
         self.assertNotIn("今天下午三点", rendered)
         self.assertNotIn("source.wav", rendered)
+
+
+    def test_cli_captures_third_party_output_without_breaking_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "private_input.wav"
+            output_dir = temp / "private_outputs"
+            _write_pcm16_wav(input_wav)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            noisy_logger = logging.getLogger("audiorescue.noisy")
+            previous_propagate = noisy_logger.propagate
+            leaky_handler = logging.StreamHandler(stderr)
+            noisy_logger.addHandler(leaky_handler)
+            noisy_logger.propagate = False
+            argv = [
+                "smoke_audio_core.py",
+                "--input",
+                str(input_wav),
+                "--output-dir",
+                str(output_dir),
+            ]
+            try:
+                with (
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(smoke, "normalize_audio", side_effect=_noisy_fake_normalize),
+                    mock.patch.object(smoke, "enhance_audio", side_effect=_fake_enhance),
+                    mock.patch.object(smoke, "transcribe_audio", side_effect=_fake_transcribe),
+                    mock.patch.object(
+                        smoke,
+                        "get_enhancer_model_fingerprint",
+                        return_value={
+                            "model_name": "DeepFilterNet3",
+                            "checkpoint_path": "checkpoints/model_120.ckpt.best",
+                            "checkpoint_sha256": "a" * 64,
+                            "config_path": "config.ini",
+                            "config_sha256": "b" * 64,
+                        },
+                    ),
+                    mock.patch.object(
+                        smoke,
+                        "get_asr_model_fingerprint",
+                        return_value={
+                            "model_name": "whisper-base",
+                            "checkpoint_path": "base.pt",
+                            "checkpoint_sha256": "c" * 64,
+                        },
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    code = smoke.main()
+            finally:
+                noisy_logger.removeHandler(leaky_handler)
+                noisy_logger.propagate = previous_propagate
+
+            payload = json.loads(stdout.getvalue())
+            rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("cli_log_capture", payload)
+        self.assertGreater(payload["cli_log_capture"]["stdout_lines"], 0)
+        self.assertGreater(payload["cli_log_capture"]["stderr_lines"], 0)
+        self.assertGreater(payload["cli_log_capture"]["warning_count"], 0)
+        self.assertGreater(payload["cli_log_capture"]["logging_count"], 0)
+        self.assertGreaterEqual(payload["cli_log_capture"]["warning_categories"]["UserWarning"], 1)
+        self.assertEqual(payload["cli_log_capture"]["logging_levels"]["WARNING"], 1)
+        self.assertNotIn("stdout leak", rendered)
+        self.assertNotIn("stderr leak", rendered)
+        self.assertNotIn("warning leak", rendered)
+        self.assertNotIn("logging leak", rendered)
+        self.assertNotIn("transcript marker", rendered)
+        self.assertNotIn(_CHINESE_TRANSCRIPT_MARKER, rendered)
+        self.assertNotIn(_LONG_FREE_TEXT[:80], rendered)
+        self.assertNotIn("example.test", rendered)
+
+    def test_cli_unexpected_exception_returns_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "private_input.wav"
+            output_dir = temp / "private_outputs"
+            _write_pcm16_wav(input_wav)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            argv = [
+                "smoke_audio_core.py",
+                "--input",
+                str(input_wav),
+                "--output-dir",
+                str(output_dir),
+            ]
+
+            def explode(*_args, **_kwargs):
+                print("unexpected stdout marker /private/cache/gamma.wav")
+                print("unexpected stderr marker C:/private/cache/delta.wav", file=sys.stderr)
+                raise RuntimeError("traceback marker private transcript must not be printed")
+
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize),
+                mock.patch.object(smoke, "enhance_audio", side_effect=explode),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = smoke.main()
+
+            payload = json.loads(stdout.getvalue())
+            rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(payload["runs"][0]["error"]["code"], "INTERNAL_ERROR")
+        self.assertEqual(payload["runs"][0]["error"]["message"], "internal error")
+        self.assertEqual(payload["runs"][0]["error"]["details"]["exception_type"], "RuntimeError")
+        self.assertIn("cli_log_capture", payload)
+        self.assertNotIn("traceback marker", rendered)
+        self.assertNotIn("unexpected stdout", rendered)
+        self.assertNotIn("unexpected stderr", rendered)
+        self.assertNotIn("private transcript", rendered)
 
 
 if __name__ == "__main__":

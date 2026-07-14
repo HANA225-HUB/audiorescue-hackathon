@@ -8,18 +8,23 @@ machines to verify the file contract without claiming model inference.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
+import logging
 import os
 import platform
 import shutil
 import sys
 import time
+import warnings
 import wave
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -75,6 +80,16 @@ def main() -> int:
     if args.runs < 1:
         parser.error("--runs must be at least 1")
 
+    output_stream = sys.stdout
+    with _CliLogCapture() as log_capture:
+        summary, exit_code = _run_smoke(args)
+
+    summary["cli_log_capture"] = log_capture.summary()
+    _print_json(summary, stream=output_stream)
+    return exit_code
+
+
+def _run_smoke(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     input_path = Path(args.input)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,9 +135,19 @@ def main() -> int:
             )
             exit_code = 2
             break
+        except Exception as exc:
+            summary["runs"].append(
+                {
+                    "run_index": run_index,
+                    "run_kind": _run_kind(run_index),
+                    "error": _unexpected_error_evidence(exc),
+                    "cuda_after_run": _cuda_after_run(),
+                }
+            )
+            exit_code = 2
+            break
 
-    _print_json(summary)
-    return exit_code
+    return summary, exit_code
 
 
 def _run_once(
@@ -367,6 +392,98 @@ def _audio_rescue_error_evidence(exc: AudioRescueError) -> dict[str, Any]:
     }
 
 
+def _unexpected_error_evidence(exc: Exception) -> dict[str, Any]:
+    return {
+        "code": "INTERNAL_ERROR",
+        "message": "internal error",
+        "module": "smoke_audio_core",
+        "details": _safe_details({"exception_type": type(exc).__name__}),
+    }
+
+
+class _CapturedLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.NOTSET)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class _CliLogCapture:
+    """Capture Python-level CLI noise and expose only fixed-count evidence."""
+
+    def __init__(self) -> None:
+        self._stdout = io.StringIO()
+        self._stderr = io.StringIO()
+        self._stack: contextlib.ExitStack | None = None
+        self._warning_records: list[warnings.WarningMessage] = []
+        self._log_handler = _CapturedLogHandler()
+
+    def __enter__(self) -> "_CliLogCapture":
+        stack = contextlib.ExitStack()
+        stack.enter_context(contextlib.redirect_stdout(self._stdout))
+        stack.enter_context(contextlib.redirect_stderr(self._stderr))
+        self._warning_records = stack.enter_context(warnings.catch_warnings(record=True))
+        warnings.simplefilter("always")
+
+        original_call_handlers = logging.Logger.callHandlers
+
+        def safe_call_handlers(_logger, record: logging.LogRecord) -> None:
+            self._log_handler.handle(record)
+
+        logging.Logger.callHandlers = safe_call_handlers
+        stack.callback(setattr, logging.Logger, "callHandlers", original_call_handlers)
+
+        self._stack = stack
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._stack is None:
+            return False
+        result = self._stack.__exit__(exc_type, exc, traceback)
+        self._stack = None
+        return bool(result)
+
+    def summary(self) -> dict[str, Any]:
+        warning_categories = Counter(
+            _safe_counter_key(item.category.__name__)
+            for item in self._warning_records
+        )
+        logging_levels = Counter(
+            _safe_counter_key(record.levelname)
+            for record in self._log_handler.records
+        )
+        return {
+            "captured": True,
+            "capture_scope": "python_stdout_stderr_warnings_logging",
+            "stdout_lines": _count_captured_lines(self._stdout.getvalue()),
+            "stderr_lines": _count_captured_lines(self._stderr.getvalue()),
+            "stdout_chars": len(self._stdout.getvalue()),
+            "stderr_chars": len(self._stderr.getvalue()),
+            "warning_count": len(self._warning_records),
+            "warning_categories": dict(sorted(warning_categories.items())),
+            "logging_count": len(self._log_handler.records),
+            "logging_levels": dict(sorted(logging_levels.items())),
+        }
+
+
+def _count_captured_lines(value: str) -> int:
+    if not value:
+        return 0
+    return len(value.splitlines())
+
+
+def _safe_counter_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    if 1 <= len(value) <= 80 and all(
+        char.isascii() and (char.isalnum() or char in "._:-") for char in value
+    ):
+        return value
+    return "unknown"
+
+
 _PATH_DETAIL_TOKENS = ("path", "dir", "cache", "file", "url", "uri")
 _SAFE_DETAIL_STRING_KEYS = {
     "code",
@@ -457,8 +574,8 @@ def _is_safe_number(value: Any) -> bool:
     )
 
 
-def _print_json(payload: dict[str, Any]) -> None:
-    print(json.dumps(_json_ready(payload), ensure_ascii=False, indent=2))
+def _print_json(payload: dict[str, Any], *, stream: TextIO | None = None) -> None:
+    print(json.dumps(_json_ready(payload), ensure_ascii=False, indent=2), file=stream)
 
 
 def _json_ready(value: Any) -> Any:
