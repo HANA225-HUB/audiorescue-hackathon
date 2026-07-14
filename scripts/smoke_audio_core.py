@@ -38,14 +38,17 @@ from core.transcribe import get_asr_model_fingerprint, transcribe_audio
 
 def main() -> int:
     parser = _build_parser()
-    if _is_help_request(sys.argv[1:]):
-        parser.parse_args()
+    argv = sys.argv[1:]
+    if _is_pure_help_request(argv):
+        parser.parse_args(argv)
         return 0
 
     output_stream = sys.stdout
     with _CliLogCapture() as log_capture:
         try:
-            args = parser.parse_args()
+            if _has_help_token(argv):
+                raise _ArgumentParseError("help_mixed")
+            args = parser.parse_args(argv)
             if args.runs < 1:
                 raise _ArgumentParseError("invalid_range")
             summary, exit_code = _run_smoke(args)
@@ -125,7 +128,11 @@ def _classify_argparse_error(message: str) -> str:
     return "parse_error"
 
 
-def _is_help_request(argv: list[str]) -> bool:
+def _is_pure_help_request(argv: list[str]) -> bool:
+    return argv in (["-h"], ["--help"])
+
+
+def _has_help_token(argv: list[str]) -> bool:
     return any(item in {"-h", "--help"} for item in argv)
 
 

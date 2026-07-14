@@ -114,6 +114,35 @@ def _assert_marker_absent(testcase: unittest.TestCase, rendered: str, marker: st
     testcase.assertNotIn(quote(encoded, safe=""), rendered)
 
 
+def _assert_safe_input_invalid(
+    testcase: unittest.TestCase,
+    *,
+    code: int,
+    stdout: str,
+    stderr: str,
+    expected_reason: str,
+    marker: str | None = None,
+) -> None:
+    payload = json.loads(stdout)
+    rendered = json.dumps(payload, ensure_ascii=False)
+
+    testcase.assertEqual(code, 2)
+    testcase.assertEqual(stderr, "")
+    testcase.assertEqual(payload["runs"][0]["error"]["code"], "INPUT_INVALID")
+    testcase.assertEqual(
+        payload["runs"][0]["error"]["message"],
+        "input audio is invalid",
+    )
+    testcase.assertEqual(
+        payload["runs"][0]["error"]["details"],
+        {"category": "argument_parse", "reason": expected_reason},
+    )
+    testcase.assertNotIn("usage:", stdout.lower())
+    testcase.assertNotIn("Traceback", stdout)
+    if marker is not None:
+        _assert_marker_absent(testcase, rendered, marker)
+
+
 class SmokeAudioCoreTest(unittest.TestCase):
     def _invoke_smoke(self, args: list[str], *, patch_normalize: bool = False):
         stdout = io.StringIO()
@@ -203,6 +232,8 @@ class SmokeAudioCoreTest(unittest.TestCase):
             output_dir = temp / "outputs"
             model_value = str(temp / f"{_CLI_SECRET_MARKER}.pt")
             device_value = f"private-device-{_CLI_SECRET_MARKER}"
+            transcribe_calls = []
+            fingerprint_calls = []
             _write_pcm16_wav(input_wav)
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -217,11 +248,36 @@ class SmokeAudioCoreTest(unittest.TestCase):
                 "--device",
                 device_value,
             ]
+
+            def fake_transcribe_with_capture(
+                audio_path: str,
+                language: str = "zh",
+                *,
+                model_name: str,
+                device: str,
+            ):
+                transcribe_calls.append((model_name, device))
+                return _fake_transcribe(
+                    audio_path,
+                    language,
+                    model_name=model_name,
+                    device=device,
+                )
+
+            def fake_fingerprint_with_capture(model_name: str, device: str):
+                fingerprint_calls.append((model_name, device))
+                return {
+                    "model_name": f"whisper-{_CLI_SECRET_MARKER}",
+                    "device": device_value,
+                    "checkpoint_path": f"{_CLI_SECRET_MARKER}.pt",
+                    "checkpoint_sha256": "D" * 64,
+                }
+
             with (
                 mock.patch.object(sys, "argv", argv),
                 mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize),
                 mock.patch.object(smoke, "enhance_audio", side_effect=_fake_enhance),
-                mock.patch.object(smoke, "transcribe_audio", side_effect=_fake_transcribe),
+                mock.patch.object(smoke, "transcribe_audio", side_effect=fake_transcribe_with_capture),
                 mock.patch.object(
                     smoke,
                     "get_enhancer_model_fingerprint",
@@ -234,12 +290,7 @@ class SmokeAudioCoreTest(unittest.TestCase):
                 mock.patch.object(
                     smoke,
                     "get_asr_model_fingerprint",
-                    return_value={
-                        "model_name": f"whisper-{_CLI_SECRET_MARKER}",
-                        "device": device_value,
-                        "checkpoint_path": f"{_CLI_SECRET_MARKER}.pt",
-                        "checkpoint_sha256": "D" * 64,
-                    },
+                    side_effect=fake_fingerprint_with_capture,
                 ),
                 contextlib.redirect_stdout(stdout),
                 contextlib.redirect_stderr(stderr),
@@ -270,6 +321,8 @@ class SmokeAudioCoreTest(unittest.TestCase):
             payload["runs"][0]["transcript_after"]["model_name"],
             "whisper-custom",
         )
+        self.assertEqual(transcribe_calls, [(model_value, device_value)] * 2)
+        self.assertEqual(fingerprint_calls, [(model_value, device_value)])
         _assert_marker_absent(self, rendered, _CLI_SECRET_MARKER)
 
     def test_parse_failures_return_single_safe_input_invalid_json(self) -> None:
@@ -283,44 +336,53 @@ class SmokeAudioCoreTest(unittest.TestCase):
         for args, expected_reason, marker in cases:
             with self.subTest(args=args[:1]):
                 code, stdout, stderr = self._invoke_smoke(args)
-                payload = json.loads(stdout)
-                rendered = json.dumps(payload, ensure_ascii=False)
-
-                self.assertEqual(code, 2)
-                self.assertEqual(stderr, "")
-                self.assertEqual(payload["runs"][0]["error"]["code"], "INPUT_INVALID")
-                self.assertEqual(
-                    payload["runs"][0]["error"]["message"],
-                    "input audio is invalid",
+                _assert_safe_input_invalid(
+                    self,
+                    code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    expected_reason=expected_reason,
+                    marker=marker,
                 )
-                self.assertEqual(
-                    payload["runs"][0]["error"]["details"],
-                    {"category": "argument_parse", "reason": expected_reason},
+
+    def test_cli_pure_help_remains_static_argparse_output(self) -> None:
+        for help_token in ("-h", "--help"):
+            with self.subTest(help_token=help_token):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(sys, "argv", ["smoke_audio_core.py", help_token]),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        smoke.main()
+
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("AudioRescue A-layer smoke test", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_mixed_help_inputs_fail_closed_without_marker_leak(self) -> None:
+        cases = [
+            (["--runs", _CLI_SECRET_MARKER, "--help"], "help_mixed", _CLI_SECRET_MARKER),
+            (["--runs", "--help"], "help_mixed", None),
+            (["--asr-model", "--help"], "help_mixed", None),
+            (["--", "--help"], "help_mixed", None),
+            (["--help", "--unknown-arg", _CLI_SECRET_MARKER], "help_mixed", _CLI_SECRET_MARKER),
+            (["--unknown-arg", _CLI_SECRET_MARKER, "--help"], "help_mixed", _CLI_SECRET_MARKER),
+        ]
+        for args, expected_reason, marker in cases:
+            with self.subTest(args=args[:2]):
+                code, stdout, stderr = self._invoke_smoke(args)
+
+                _assert_safe_input_invalid(
+                    self,
+                    code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    expected_reason=expected_reason,
+                    marker=marker,
                 )
-                self.assertNotIn("usage:", stdout.lower())
-                self.assertNotIn("Traceback", stdout)
-                if marker is not None:
-                    _assert_marker_absent(self, rendered, marker)
-
-    def test_cli_help_remains_static_argparse_output(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(
-                sys,
-                "argv",
-                ["smoke_audio_core.py", "--help", _CLI_SECRET_MARKER],
-            ),
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            with self.assertRaises(SystemExit) as raised:
-                smoke.main()
-
-        self.assertEqual(raised.exception.code, 0)
-        self.assertIn("AudioRescue A-layer smoke test", stdout.getvalue())
-        self.assertNotIn(_CLI_SECRET_MARKER, stdout.getvalue())
-        self.assertEqual(stderr.getvalue(), "")
 
     def test_cli_pre_run_boundary_does_not_swallow_system_exit(self) -> None:
         argv = [
