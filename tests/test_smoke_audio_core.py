@@ -398,6 +398,58 @@ class SmokeAudioCoreTest(unittest.TestCase):
         self.assertNotIn(_LONG_FREE_TEXT[:80], rendered)
         self.assertNotIn("example.test", rendered)
 
+    def test_cli_pre_run_output_dir_file_error_returns_json_without_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "private_input.wav"
+            marker = "cache_private_transcript_token_secret_marker"
+            output_path = temp / marker
+            _write_pcm16_wav(input_wav)
+            output_path.write_text("not a directory", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            argv = [
+                "smoke_audio_core.py",
+                "--input",
+                str(input_wav),
+                "--output-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = smoke.main()
+
+            payload = json.loads(stdout.getvalue())
+            rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(payload["runs"][0]["error"]["code"], "INTERNAL_ERROR")
+        self.assertEqual(payload["runs"][0]["error"]["message"], "internal error")
+        self.assertEqual(payload["runs"][0]["error"]["details"]["exception_type"], "FileExistsError")
+        self.assertIn("cli_log_capture", payload)
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn("File exists", rendered)
+        self.assertNotIn(str(output_path), rendered)
+
+    def test_cli_pre_run_boundary_does_not_swallow_keyboard_interrupt(self) -> None:
+        argv = [
+            "smoke_audio_core.py",
+            "--input",
+            "unused.wav",
+            "--output-dir",
+            "unused_outputs",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(smoke, "_run_smoke", side_effect=KeyboardInterrupt),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                smoke.main()
+
     def test_cli_unexpected_exception_returns_json_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

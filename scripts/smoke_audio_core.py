@@ -82,11 +82,33 @@ def main() -> int:
 
     output_stream = sys.stdout
     with _CliLogCapture() as log_capture:
-        summary, exit_code = _run_smoke(args)
+        try:
+            summary, exit_code = _run_smoke(args)
+        except Exception as exc:
+            summary = _pre_run_error_summary(exc)
+            exit_code = 2
 
     summary["cli_log_capture"] = log_capture.summary()
     _print_json(summary, stream=output_stream)
     return exit_code
+
+
+def _pre_run_error_summary(exc: Exception) -> dict[str, Any]:
+    return {
+        "environment": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+        },
+        "runs": [
+            {
+                "run_index": 0,
+                "run_kind": "pre_run",
+                "error": _unexpected_error_evidence(exc),
+                "cuda_after_run": _cuda_after_run(),
+            }
+        ],
+    }
 
 
 def _run_smoke(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
