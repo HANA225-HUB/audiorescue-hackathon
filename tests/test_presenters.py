@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
+from urllib.parse import unquote
 
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
 from ui.presenters import (
@@ -199,6 +203,97 @@ class PresenterTests(unittest.TestCase):
         self.assertIn("原轨", rendered)
         self.assertIn("混合增强轨", rendered)
         self.assertIn("-20.2 dBFS", rendered)
+
+    def test_staged_gradio_paths_hide_source_sentinels_and_preserve_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            job_root = root / "outputs" / "safe_job" / "SECRET_WORKSPACE"
+            job_root.mkdir(parents=True)
+            original = job_root / "SECRET_USER_original.wav"
+            mixed = job_root / "SECRET_USER_mixed.wav"
+            full = job_root / "SECRET_USER_full.wav"
+            spectrogram = job_root / "SECRET_USER_spectrogram.png"
+            waveform = job_root / "SECRET_USER_waveform.png"
+            original.write_bytes(b"original-content")
+            mixed.write_bytes(b"mixed-content")
+            full.write_bytes(b"full-content")
+            spectrogram.write_bytes(b"spectrogram-content")
+            waveform.write_bytes(b"waveform-content")
+            result = {
+                "job_id": "safe_job",
+                "status": "success",
+                "runtime": {"total_seconds": 1.0},
+                "input_meta": {
+                    "source_name": "SECRET_USER_private_take.wav",
+                    "source_format": "wav",
+                    "sample_rate": 48000,
+                    "channels": 1,
+                    "duration_seconds": 1.0,
+                    "peak_abs": 0.1,
+                    "rms_dbfs": -20.0,
+                    "clipped_ratio": 0.0,
+                    "silent_ratio": 0.0,
+                },
+                "original_audio_path": str(original),
+                "mixed_output_path": str(mixed),
+                "enhanced_audio_path": str(mixed),
+                "full_output_path": str(full),
+                "spectrogram_path": str(spectrogram),
+                "waveform_path": str(waveform),
+                "warnings": [],
+                "events": [],
+                "config_snapshot": {},
+            }
+
+            with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+            ):
+                view = result_to_view(result)
+
+            self.assertEqual(Path(view["original_audio"]).read_bytes(), b"original-content")
+            self.assertEqual(Path(view["enhanced_audio"]).read_bytes(), b"mixed-content")
+            self.assertEqual(Path(view["mixed_download"]).read_bytes(), b"mixed-content")
+            self.assertEqual(Path(view["full_download"]).read_bytes(), b"full-content")
+            self.assertEqual(Path(view["spectrogram_image"]).read_bytes(), b"spectrogram-content")
+            self.assertEqual(Path(view["waveform_image"]).read_bytes(), b"waveform-content")
+
+            visible_text = "\n".join(
+                str(view[key])
+                for key in (
+                    "status_md",
+                    "input_md",
+                    "playback_note_md",
+                    "runtime_md",
+                    "warnings_html",
+                )
+            )
+            exposed_paths = unquote(
+                " ".join(
+                    str(view[key])
+                    for key in (
+                        "original_audio",
+                        "enhanced_audio",
+                        "mixed_download",
+                        "full_download",
+                        "spectrogram_image",
+                        "waveform_image",
+                    )
+                )
+            )
+            for rendered in (visible_text, exposed_paths):
+                self.assertNotIn("SECRET_WORKSPACE", rendered)
+                self.assertNotIn("SECRET_USER", rendered)
+                self.assertNotIn("outputs/safe_job", rendered)
+                self.assertNotIn("SECRET_USER_private_take.wav", rendered)
+            self.assertIn("已隐藏文件名", visible_text)
+            self.assertTrue(Path(view["original_audio"]).is_relative_to(staging_root))
+
+    def test_status_markup_covers_input_error_fixture(self) -> None:
+        rendered = result_to_view(load_fixture("process_result_input_error"))["status_md"]
+        self.assertIn("data-status='failed'", rendered)
+        self.assertIn("ar-status-failed", rendered)
+        self.assertIn("急救未完成", rendered)
 
 
 if __name__ == "__main__":

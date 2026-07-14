@@ -15,6 +15,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .file_staging import resolve_allowed_file, stage_files_for_gradio
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT_DIR / "tests" / "fixtures"
 
@@ -110,30 +112,12 @@ def file_if_exists(
 ) -> str | None:
     # File-bearing Gradio components can make a server-side path downloadable.
     # No trusted result root therefore means no file, even when the path exists.
-    if not allowed_roots:
-        return None
-    if not path_value:
-        return None
-    path = Path(str(path_value)).expanduser()
-    if not path.is_absolute():
-        path = ROOT_DIR / path
-    try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        return None
-    if not resolved.is_file():
-        return None
-    allowed = False
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root.resolve())
-            allowed = True
-            break
-        except (OSError, RuntimeError, ValueError):
-            continue
-    if not allowed:
-        return None
-    return str(resolved)
+    resolved = resolve_allowed_file(
+        path_value,
+        allowed_roots=allowed_roots,
+        base_dir=ROOT_DIR,
+    )
+    return str(resolved) if resolved is not None else None
 
 
 def _result_file_roots(result: dict[str, Any]) -> tuple[Path, ...]:
@@ -232,7 +216,7 @@ def input_markdown(result: dict[str, Any]) -> str:
     lines = [
         "### 输入信息",
         "",
-        f"- 文件：`{meta.get('source_name') or '未记录'}`",
+        f"- 文件：`{'已隐藏文件名' if meta.get('source_name') else '未记录'}`",
         f"- 原始格式：`{meta.get('source_format') or '未记录'}`",
         f"- 原始采样率：`{meta.get('original_sample_rate') or '未记录'}` Hz",
         f"- 原始声道：`{meta.get('original_channels') or '未记录'}`",
@@ -305,7 +289,7 @@ def playback_note_markdown(result: dict[str, Any]) -> str:
         "- 同一播放设置，未做响度匹配；请勿把音量差异直接等同于清晰度提升。",
     ]
     if mixed_path:
-        lines.append(f"- 当前混合轨：`{Path(str(mixed_path)).name}`")
+        lines.append("- 当前混合轨：`mixed_output_path` 已返回，文件名已隐藏。")
     if full_path:
         lines.append("- 100% DeepFilterNet 输出仅用于调试或下载，不作为默认 After 播放轨。")
     original_levels = as_dict(result.get("original_levels"))
@@ -463,30 +447,33 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
 
     mixed_path = result.get("mixed_output_path") or result.get("enhanced_audio_path")
     allowed_roots = _result_file_roots(result)
+    staged_files = stage_files_for_gradio(
+        {
+            "original_audio": result.get("original_audio_path"),
+            "mixed_audio": mixed_path,
+            "full_audio": result.get("full_output_path"),
+            "spectrogram_image": result.get("spectrogram_path"),
+            "waveform_image": result.get("waveform_path"),
+        },
+        allowed_roots=allowed_roots,
+        base_dir=ROOT_DIR,
+    )
     view = {
         "status_md": status_markdown(result),
         "input_md": input_markdown(result),
         "playback_note_md": playback_note_markdown(result),
-        "original_audio": file_if_exists(
-            result.get("original_audio_path"), allowed_roots=allowed_roots
-        ),
-        "enhanced_audio": file_if_exists(mixed_path, allowed_roots=allowed_roots),
+        "original_audio": staged_files["original_audio"],
+        "enhanced_audio": staged_files["mixed_audio"],
         "transcript_before_md": transcript_markdown("处理前转写", result.get("transcript_before")),
         "transcript_after_md": transcript_markdown("增强后转写", result.get("transcript_after")),
         "diff_html": diff_html(result),
         "cer_md": cer_markdown(result),
-        "spectrogram_image": file_if_exists(
-            result.get("spectrogram_path"), allowed_roots=allowed_roots
-        ),
-        "waveform_image": file_if_exists(
-            result.get("waveform_path"), allowed_roots=allowed_roots
-        ),
+        "spectrogram_image": staged_files["spectrogram_image"],
+        "waveform_image": staged_files["waveform_image"],
         "runtime_md": runtime_markdown(result),
         "warnings_html": warnings_html(result),
-        "mixed_download": file_if_exists(mixed_path, allowed_roots=allowed_roots),
-        "full_download": file_if_exists(
-            result.get("full_output_path"), allowed_roots=allowed_roots
-        ),
+        "mixed_download": staged_files["mixed_audio"],
+        "full_download": staged_files["full_audio"],
         "transcript_download": None,
         "result_download": None,
     }
