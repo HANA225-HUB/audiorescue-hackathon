@@ -136,7 +136,12 @@ class AudioIOContractTest(unittest.TestCase):
 
             self.assertEqual(runner.call_count, 1)
             command = runner.call_args.args[0]
-            self.assertIn("-nostdin", command)
+            # ffprobe does not support ffmpeg's -nostdin option; DEVNULL below
+            # already prevents the process from reading interactive input.
+            self.assertNotIn("-nostdin", command)
+            self.assertIs(
+                runner.call_args.kwargs["stdin"], subprocess.DEVNULL
+            )
             self.assertEqual(
                 runner.call_args.kwargs["timeout"],
                 audio_io.FFPROBE_TIMEOUT_SECONDS,

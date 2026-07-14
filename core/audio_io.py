@@ -304,7 +304,6 @@ def _probe_non_wav(source: Path) -> float:
         )
     command = [
         ffprobe,
-        "-nostdin",
         "-v",
         "error",
         "-select_streams",
