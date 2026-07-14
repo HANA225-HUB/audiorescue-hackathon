@@ -1,0 +1,50 @@
+contract_version: "v0.1-contract"
+
+app:
+  title: "听清又听懂·智能音频急救台"
+  output_root: "outputs"
+  concurrency: 1
+
+audio:
+  target_sample_rate: 48000
+  channels: 1
+  pcm_subtype: "PCM_16"
+  min_duration_seconds: 1
+  max_duration_seconds: 60
+  demo_max_duration_seconds: 15
+  peak_limit: 0.99
+
+enhancement:
+  backend: "deepfilternet"
+  model: "DeepFilterNet3"
+  default_strength: 0.75
+  strengths:
+    light: 0.50
+    standard: 0.75
+    strong: 1.00
+  default_playback_track: "mixed"
+  default_asr_after_track: "mixed"
+
+asr:
+  backend: "openai-whisper"
+  model: "base"
+  language: "zh"
+  task: "transcribe"
+  device: "auto"
+  temperature: 0.0
+  condition_on_previous_text: false
+  initial_prompt: null
+  fp16_on_cuda: true
+
+comparison:
+  loudness_dsp_matching: false
+  same_player_volume: true
+  report_rms_dbfs: true
+  report_peak_abs: true
+
+events:
+  enabled_by_default: false
+
+cache:
+  enabled: true
+  demo_only: true

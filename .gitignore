@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# AudioRescue local data and generated artifacts
+data_local/
+models/
+weights/
+.cache/
+outputs/*
+!outputs/.gitkeep
+logs/
+*.log
+
+# Model and dataset binaries
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.h5
+*.hdf5
+*.zip
+*.tar
+*.tar.gz
+
+# Keep only deliberately committed test/demo WAV files
+*.wav
+!tests/fixtures/*.wav
+!demo_assets/*.wav

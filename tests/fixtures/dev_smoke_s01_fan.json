@@ -1,0 +1,12 @@
+{
+  "id": "dev_smoke_s01_fan",
+  "intended_use": "integration_smoke_only",
+  "source": "macOS system TTS plus deterministic synthetic fan-like noise",
+  "reference_text": "今天下午三点，我们在实验室讨论语音处理项目的最终方案。",
+  "language": "zh",
+  "expected_sample_rate": 48000,
+  "expected_channels": 1,
+  "target_duration_seconds": "10-15",
+  "is_evaluation_data": false,
+  "is_demo_evidence": false
+}
