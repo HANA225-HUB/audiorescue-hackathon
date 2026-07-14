@@ -1,0 +1,14 @@
+contract_version: "v0.1-contract"
+
+# Only development fixtures are frozen today. Competition demo samples must be
+# added here by C after consent, transcription review, listening review, and a
+# full offline run. B must not hard-code paths outside this manifest.
+samples:
+  - id: "DEV_SMOKE_S01_FAN"
+    name: "开发联调：风扇噪声普通话"
+    file: "tests/fixtures/dev_smoke_s01_fan.wav"
+    reference_text: "今天下午三点，我们在实验室讨论语音处理项目的最终方案。"
+    intended_use: "development_only"
+    default: true
+    enable_events: false
+    sha256: "18a97a227d5530a313186683962d377308c4b7f24d8e559362fd9d378261d3ae"

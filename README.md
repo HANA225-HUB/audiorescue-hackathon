@@ -13,7 +13,10 @@
 ## 当前状态
 
 - `v0.1-contract`：公共数据结构与 A 音频后端接口已经冻结；
-- 本仓库当前为私有协作仓库；
+- C 集成分支已实现 `process_audio` 编排、中文 CER、透明缓存、P1 隔离壳、结果持久化与集成测试；
+- C 的自动测试使用确定性假后端，不代表 DeepFilterNet/Whisper 已完成真实推理验收；
+- 真实 P0 闭环仍需合并 A 的音频模块与 B 的页面/可视化模块后，在 4090 演示环境执行；
+- 本仓库当前为三人共享的公开仓库；只有受邀协作者可直接写入；
 - 模型、外部数据集、用户音频和运行产物不会提交到 Git；
 - `tests/fixtures/` 中的合成音频只用于联调，不作为比赛效果证据。
 
@@ -52,6 +55,15 @@ python -m pip check
 ```
 
 PyTorch 与 TorchAudio 应先按 GPU 单独安装，不写入通用 `requirements.txt`，避免 4090/5090 安装错误的 CUDA wheel。
+
+本项目 4090 服务器已准备独立环境，登录后执行：
+
+```bash
+source /root/autodl-tmp/audiorescue_env.sh
+cd "$AUDIORESCUE_ROOT"
+```
+
+需要下载学术资源或模型时，可在下载命令前执行 `source /etc/network_turbo`。该加速只影响当前 shell，不应写入项目代码。
 
 ## 配置与产物
 

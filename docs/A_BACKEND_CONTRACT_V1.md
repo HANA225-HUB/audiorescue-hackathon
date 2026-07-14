@@ -11,6 +11,7 @@
 A 只能从 `core.schemas` 导入：
 
 ```text
+AudioLevelMetrics
 AudioMeta
 TranscriptResult
 TranscriptSegment
@@ -31,6 +32,7 @@ ASRInferenceError
 - `TranscriptResult.language`：Whisper 未返回时可为 `None`；
 - `TranscriptResult.error`：成功或空文本时必须为 `None`；真正失败抛 `ASRInferenceError`；
 - `ProcessResult` 中某阶段未产生的结果路径、转写、CER、图像均可为 `None`；
+- `ProcessResult.original_levels` 与 `mixed_levels` 在对应轨道未生成或未完成体检时可为 `None`；
 - `events`、`warnings`、`config_snapshot` 永不为 `None`，没有内容时为空集合。
 
 ## 2. A 层最终函数签名
@@ -172,6 +174,21 @@ P0 不在 A 的模型输出上做额外响度 DSP，也不引入临时 LUFS 依�
 5. 默认页面播放和 After ASR 均使用 `enhanced_mix.wav`；
 6. `enhanced_full.wav` 仅作100%增强调试与下载；
 7. `ProcessResult.enhanced_audio_path` 是兼容别名，永远等于 `mixed_output_path`。
+
+响度证据的公共结构为：
+
+```python
+AudioLevelMetrics(
+    peak_abs: float,        # 必须有限，范围 0.0..1.0
+    rms_dbfs: float | None, # 非静音时必须有限；数字静音使用 None
+)
+```
+
+`ProcessResult.original_levels` 严格对应 `original_audio_path`，
+`ProcessResult.mixed_levels` 严格对应 `mixed_output_path`。两者是为了证明 A/B
+没有靠放大音量制造效果，不是新的音频处理步骤。旧的 `ProcessResult(...)`
+构造调用不传这两个字段仍合法，默认值均为 `None`。不得用 `NaN`、
+`Infinity` 或 `-Infinity` 代表静音。
 
 以后若加入 LUFS，只能生成新的播放副本，不覆盖上述三条标准轨，并需升级契约版本。
 

@@ -1,0 +1,15 @@
+contract_version: "v0.1-contract"
+
+# Fixed natural-language candidates for the optional P1 detector.
+# The main P0 environment must not load a model merely to read this file.
+labels:
+  - "a person speaking"
+  - "keyboard typing"
+  - "an electric fan running"
+  - "road traffic"
+  - "a car horn honking"
+  - "an emergency siren"
+  - "hands clapping"
+  - "someone knocking on a door"
+  - "a telephone ringing"
+  - "glass breaking"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from math import isfinite
 from typing import Any, TypedDict
 
 
@@ -71,6 +72,27 @@ class AudioMeta:
     original_sample_rate: int | None = None
     original_channels: int | None = None
     source_format: str | None = None
+
+
+@dataclass(slots=True)
+class AudioLevelMetrics:
+    """Comparable level evidence for one persisted audio track.
+
+    ``peak_abs`` uses normalized full scale, so valid values are finite and in
+    the inclusive range 0..1. ``rms_dbfs`` is finite for non-silent audio and
+    ``None`` for digital silence; infinity is never used as a JSON sentinel.
+    """
+
+    peak_abs: float
+    rms_dbfs: float | None
+
+    def __post_init__(self) -> None:
+        self.peak_abs = _validated_finite_float(self.peak_abs, "peak_abs")
+        if not 0.0 <= self.peak_abs <= 1.0:
+            raise ValueError("peak_abs must be between 0.0 and 1.0")
+
+        if self.rms_dbfs is not None:
+            self.rms_dbfs = _validated_finite_float(self.rms_dbfs, "rms_dbfs")
 
 
 @dataclass(slots=True)
@@ -141,6 +163,8 @@ class ProcessResult:
     enhanced_audio_path: str | None = None
     full_output_path: str | None = None
     mixed_output_path: str | None = None
+    original_levels: AudioLevelMetrics | None = None
+    mixed_levels: AudioLevelMetrics | None = None
 
     transcript_before: TranscriptResult | None = None
     transcript_after: TranscriptResult | None = None
@@ -182,14 +206,37 @@ class EnhancementOutput(TypedDict):
     warnings: list[WarningItem]
 
 
+def _validated_finite_float(value: Any, field_name: str) -> float:
+    if isinstance(value, (bool, str, bytes)):
+        raise TypeError(f"{field_name} must be a real number")
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise TypeError(f"{field_name} must be a real number") from error
+    if not isfinite(numeric_value):
+        raise ValueError(f"{field_name} must be finite")
+    return numeric_value
+
+
 def _json_ready(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
     if isinstance(value, dict):
-        return {str(key): _json_ready(item) for key, item in value.items()}
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            normalized[key] = _json_ready(item)
+        return normalized
     if isinstance(value, (list, tuple)):
         return [_json_ready(item) for item in value]
-    return value
+    raise TypeError(f"value is not JSON-compatible: {type(value).__name__}")
 
 
 class AudioRescueError(Exception):
@@ -258,6 +305,7 @@ class VisualizationError(AudioRescueError):
 
 __all__ = [
     "ASRInferenceError",
+    "AudioLevelMetrics",
     "AudioMeta",
     "AudioRescueError",
     "CerResult",
