@@ -1,0 +1,70 @@
+{
+  "job_id": "fixture_partial_asr",
+  "status": "partial",
+  "runtime": {
+    "decode_seconds": 0.2,
+    "enhancer_load_seconds": 0.0,
+    "enhancement_seconds": 1.4,
+    "asr_load_seconds": 0.0,
+    "asr_before_seconds": 1.7,
+    "asr_after_seconds": 0.0,
+    "visualization_seconds": 0.4,
+    "event_seconds": 0.0,
+    "persistence_seconds": 0.1,
+    "total_seconds": 3.8,
+    "cache_hit": false,
+    "cold_start": false,
+    "device": "cpu"
+  },
+  "input_meta": {
+    "source_name": "dev_smoke_s01_fan.wav",
+    "sample_rate": 48000,
+    "channels": 1,
+    "duration_seconds": 12.0,
+    "peak_abs": 0.91,
+    "rms_dbfs": -21.6,
+    "clipped_ratio": 0.0,
+    "silent_ratio": 0.03,
+    "normalized_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+    "original_sample_rate": 48000,
+    "original_channels": 1,
+    "source_format": "wav"
+  },
+  "original_audio_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+  "enhanced_audio_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+  "full_output_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+  "mixed_output_path": "tests/fixtures/dev_smoke_s01_fan.wav",
+  "transcript_before": {
+    "text": "今天下午三点我们在实验室讨论语音处理项目的最终方案",
+    "language": "zh",
+    "segments": [],
+    "runtime_seconds": 1.7,
+    "model_name": "whisper-base",
+    "error": null
+  },
+  "transcript_after": null,
+  "cer_before": null,
+  "cer_after": null,
+  "text_diff_html": null,
+  "waveform_path": null,
+  "spectrogram_path": null,
+  "events": [],
+  "warnings": [
+    {
+      "code": "ASR_AFTER_FAILED",
+      "message": "增强轨转写失败；音频结果仍可播放。",
+      "module": "transcribe",
+      "recoverable": true,
+      "details": {
+        "track": "after"
+      }
+    }
+  ],
+  "config_snapshot": {
+    "strength": 0.75,
+    "enable_events": false,
+    "asr_model": "whisper-base",
+    "asr_language": "zh",
+    "sample_notice": "开发联调样例，非比赛效果证据"
+  }
+}
