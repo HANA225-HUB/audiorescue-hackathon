@@ -23,6 +23,7 @@
 | 2026-07-14 | C 本地 macOS / Python 3.13.3 / `codex/c-integration` | `python3 -m unittest discover -s tests -q` | 144/144 通过；新增母带转码、逐条授权哈希、固定混音、严格校验、freeze v2、locked 规范身份回执、输入 staging、防冻结集重标、盲听平衡与仓库安全测试；未使用正式录音，不代表效果验收 |
 | 2026-07-14 | A/C 本地 / `efd83ac` + `feb5a96` | 全量 `unittest discover` | 191/191 通过，1 项可视化依赖缺失跳过；音频输入预检、模型/设备显式 ASR、线程锁和数据集级一次性回执通过 |
 | 2026-07-14 | C 本地 macOS / 当前工作区 | 11 个关键模块定向 `unittest` | 124/124 通过；覆盖录音映射、模型哈希 cache identity、盲测随机化、UI fail-closed、公开音频授权门禁和 locked one-shot |
+| 2026-07-15 | RTX 4090 / Python 3.10.8 / `db7eb92` | `python -m unittest discover -s tests -q` | 193/193 通过；同 SHA 的两次 GitHub Actions 均成功 |
 
 ## 4090 环境验收
 
@@ -43,10 +44,15 @@
 |---|---:|---:|---:|---|
 | DeepFilterNet3 历史 12秒样例 | 约 3.0 秒（含进程与模型加载） | 待补独立测量 | 0.27 秒，RTF 0.023 | 模型与 CUDA 跑通；当前 fixture 待复测 |
 | Whisper base 历史原轨 | 72 秒（包含 139MB 首次下载） | 1.327 秒 | 0.762 秒 | 模型与 CUDA 跑通；不作为当前 fixture 的 ASR 证据 |
-| Whisper base mixed轨 | 待测 | 待测 | 待测 | 代码已合入；待当前 SHA 在 4090 用已授权语音复测 |
-| 端到端 | 待测 | 待测 | 待测 | 代码已合入；待当前 SHA 的 merged E2E 与页面验收 |
+| 已授权 B-S01 clean WAV merged E2E | 5.22 秒总耗时 | enhancer 0.35 秒 / ASR 1.13 秒 | 增强 0.24 秒；双路 ASR 0.77 / 0.30 秒 | `success`，CUDA；CER 0.08 → 0.08 |
+| 已授权 B-S01 clean M4A merged E2E | 5.28 秒总耗时 | enhancer 0.36 秒 / ASR 1.10 秒 | 增强 0.23 秒；双路 ASR 0.74 / 0.29 秒 | 首次发现并修复 ffprobe 参数后 `success`；CER 0.08 → 0.16 |
+| B-S01 风扇真实带噪 M4A | 5.64 秒冷启动 | 热运行总耗时 1.69–1.79 秒 | strength 0.50 / 0.75 / 1.00 | CER 分别 0.20→0.16、0.20→0.32、0.20→0.20；该样例偏向轻度增强 |
+| C-S02 键盘真实带噪 M4A | 5.90 秒冷启动 | 热运行总耗时 1.87 秒 | strength 0.50 / 0.75 | 固定繁简归一化后 CER 均为 0.04→0.00 |
+| 生产 UI 构建与 presenter | 模型已缓存 | 不重新推理 | 读取真实 `result.json` | fixture 关闭；原轨、增强轨、波形、声谱图五项路径均通过安全根目录检查 |
 
 上述 Whisper 文本来自已被替换的历史语音 fixture，只证明当时链路可用，不能归到当前纯数学 fixture，也不能作为比赛效果证据。当前双路 ASR 必须改用 `data_local` 内已授权的 S01/S02 真实录音。
+
+真实开发样例说明：当前证据足以确认 merged WAV/M4A、CUDA、双路 ASR、可视化和 UI presenter 已跑通，但还不足以冻结默认 strength。风扇样例更偏向 0.50，键盘样例在 0.50/0.75 均改善；应等三段纯噪声生成 18 条 dev 控制混合并完成人工听感后再冻结，不能根据单条样例挑最好看的结果。
 
 ## 本轮真实录音入库
 
