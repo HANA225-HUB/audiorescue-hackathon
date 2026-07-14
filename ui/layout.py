@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,16 @@ def _read_css() -> str:
 def _first_fixture() -> str:
     names = list_fixture_names()
     return names[0] if names else ""
+
+
+def _fixture_mode_default() -> bool:
+    """Keep competition startup on the real pipeline unless explicitly opted in."""
+
+    return os.environ.get("AUDIORESCUE_UI_FIXTURE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _run_fixture(fixture_name: str) -> tuple[Any, ...]:
@@ -88,6 +99,7 @@ def build_demo():
 
     fixture_names = list_fixture_names()
     default_fixture = _first_fixture()
+    fixture_default = _fixture_mode_default()
 
     with gr.Blocks(css=_read_css(), title="听清又听懂·智能音频急救台") as demo:
         gr.Markdown(
@@ -97,7 +109,10 @@ def build_demo():
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=5):
-                use_fixture = gr.Checkbox(value=True, label="使用前端 fixture 模式")
+                use_fixture = gr.Checkbox(
+                    value=fixture_default,
+                    label="开发专用：使用前端 fixture 假数据",
+                )
                 fixture = gr.Dropdown(
                     choices=fixture_names,
                     value=default_fixture,
@@ -176,7 +191,7 @@ def build_demo():
             outputs=outputs,
         )
 
-        if default_fixture:
+        if default_fixture and fixture_default:
             demo.load(_run_fixture, inputs=[fixture], outputs=outputs)
 
     return demo

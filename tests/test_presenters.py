@@ -5,6 +5,7 @@ import unittest
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
 from ui.presenters import (
     UI_TUPLE_KEYS,
+    cer_markdown,
     diff_html,
     list_fixture_names,
     load_fixture,
@@ -114,6 +115,34 @@ class PresenterTests(unittest.TestCase):
         view = result_to_view(result)
         self.assertIsNone(view["transcript_download"])
         self.assertIsNone(view["result_download"])
+
+    def test_cer_direction_labels_improvement_tie_and_regression(self) -> None:
+        result = load_fixture("process_result_ok")
+        self.assertIn("（改善）", cer_markdown(result))
+        result["cer_after"]["cer"] = result["cer_before"]["cer"]
+        self.assertIn("持平", cer_markdown(result))
+        result["cer_after"]["cer"] = 0.5
+        rendered = cer_markdown(result)
+        self.assertIn("（变差）", rendered)
+        self.assertNotIn("下降 -", rendered)
+
+    def test_presenter_never_serves_arbitrary_existing_server_files(self) -> None:
+        result = load_fixture("process_result_ok")
+        result["original_audio_path"] = "/etc/hosts"
+        result["mixed_output_path"] = "/etc/hosts"
+        view = result_to_view(result)
+        self.assertIsNone(view["original_audio"])
+        self.assertIsNone(view["enhanced_audio"])
+        self.assertNotIn("/etc/hosts", view["playback_note_md"])
+
+    def test_playback_note_exposes_both_loudness_tracks_when_available(self) -> None:
+        result = load_fixture("process_result_ok")
+        result["original_levels"] = {"peak_abs": 0.5, "rms_dbfs": -20.0}
+        result["mixed_levels"] = {"peak_abs": 0.48, "rms_dbfs": -20.2}
+        rendered = result_to_view(result)["playback_note_md"]
+        self.assertIn("原轨", rendered)
+        self.assertIn("混合增强轨", rendered)
+        self.assertIn("-20.2 dBFS", rendered)
 
 
 if __name__ == "__main__":

@@ -97,13 +97,49 @@ def strength_value(label_or_value: Any) -> float:
     return max(0.0, min(1.0, value))
 
 
-def file_if_exists(path_value: Any) -> str | None:
+def file_if_exists(
+    path_value: Any,
+    *,
+    allowed_roots: tuple[Path, ...] = (),
+) -> str | None:
     if not path_value:
         return None
     path = Path(str(path_value)).expanduser()
     if not path.is_absolute():
         path = ROOT_DIR / path
-    return str(path) if path.exists() else None
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_file():
+        return None
+    if allowed_roots:
+        allowed = False
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root.resolve())
+                allowed = True
+                break
+            except (OSError, RuntimeError, ValueError):
+                continue
+        if not allowed:
+            return None
+    return str(resolved)
+
+
+def _result_file_roots(result: dict[str, Any]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    job_id = str(result.get("job_id") or "")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        roots.append(ROOT_DIR / "outputs" / job_id)
+    fixture_path = result.get("_fixture_path")
+    if fixture_path:
+        try:
+            Path(str(fixture_path)).resolve().relative_to(FIXTURE_DIR.resolve())
+            roots.append(FIXTURE_DIR)
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return tuple(roots)
 
 
 def format_seconds(value: Any) -> str:
@@ -242,9 +278,25 @@ def playback_note_markdown(result: dict[str, Any]) -> str:
         "- 同一播放设置，未做响度匹配；请勿把音量差异直接等同于清晰度提升。",
     ]
     if mixed_path:
-        lines.append(f"- 当前混合轨：`{mixed_path}`")
+        lines.append(f"- 当前混合轨：`{Path(str(mixed_path)).name}`")
     if full_path:
         lines.append("- 100% DeepFilterNet 输出仅用于调试或下载，不作为默认 After 播放轨。")
+    original_levels = as_dict(result.get("original_levels"))
+    mixed_levels = as_dict(result.get("mixed_levels"))
+    if original_levels and mixed_levels:
+        lines.extend(
+            [
+                "",
+                "| 轨道 | 峰值 | RMS |",
+                "|---|---:|---:|",
+                f"| 原轨 | {format_number(original_levels.get('peak_abs'), 3)} | "
+                f"{format_number(original_levels.get('rms_dbfs'), 1)} dBFS |",
+                f"| 混合增强轨 | {format_number(mixed_levels.get('peak_abs'), 3)} | "
+                f"{format_number(mixed_levels.get('rms_dbfs'), 1)} dBFS |",
+            ]
+        )
+    else:
+        lines.append("- 响度证据尚未完整返回，当前不能据此宣称 A/B 响度公平。")
     return "\n".join(lines)
 
 
@@ -288,7 +340,12 @@ def cer_markdown(result: dict[str, Any]) -> str:
     after_cer = after.get("cer")
     try:
         delta = (float(before_cer) - float(after_cer)) * 100
-        delta_text = f"下降 {delta:.1f} 个百分点"
+        if delta > 1e-12:
+            delta_text = f"下降 {delta:.1f} 个百分点（改善）"
+        elif delta < -1e-12:
+            delta_text = f"上升 {abs(delta):.1f} 个百分点（变差）"
+        else:
+            delta_text = "持平"
     except (TypeError, ValueError):
         delta_text = "变化未记录"
     ref_len = len(str(before.get("normalized_reference") or before.get("reference") or ""))
@@ -359,22 +416,31 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
         result = failed_result("未收到可展示的处理结果。", "INTERNAL_ERROR")
 
     mixed_path = result.get("mixed_output_path") or result.get("enhanced_audio_path")
+    allowed_roots = _result_file_roots(result)
     view = {
         "status_md": status_markdown(result),
         "input_md": input_markdown(result),
         "playback_note_md": playback_note_markdown(result),
-        "original_audio": file_if_exists(result.get("original_audio_path")),
-        "enhanced_audio": file_if_exists(mixed_path),
+        "original_audio": file_if_exists(
+            result.get("original_audio_path"), allowed_roots=allowed_roots
+        ),
+        "enhanced_audio": file_if_exists(mixed_path, allowed_roots=allowed_roots),
         "transcript_before_md": transcript_markdown("处理前转写", result.get("transcript_before")),
         "transcript_after_md": transcript_markdown("增强后转写", result.get("transcript_after")),
         "diff_html": diff_html(result),
         "cer_md": cer_markdown(result),
-        "spectrogram_image": file_if_exists(result.get("spectrogram_path")),
-        "waveform_image": file_if_exists(result.get("waveform_path")),
+        "spectrogram_image": file_if_exists(
+            result.get("spectrogram_path"), allowed_roots=allowed_roots
+        ),
+        "waveform_image": file_if_exists(
+            result.get("waveform_path"), allowed_roots=allowed_roots
+        ),
         "runtime_md": runtime_markdown(result),
         "warnings_html": warnings_html(result),
-        "mixed_download": file_if_exists(mixed_path),
-        "full_download": file_if_exists(result.get("full_output_path")),
+        "mixed_download": file_if_exists(mixed_path, allowed_roots=allowed_roots),
+        "full_download": file_if_exists(
+            result.get("full_output_path"), allowed_roots=allowed_roots
+        ),
         "transcript_download": None,
         "result_download": None,
     }
