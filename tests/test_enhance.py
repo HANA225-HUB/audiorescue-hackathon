@@ -3,6 +3,7 @@ import time
 import unittest
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from unittest import mock
 
@@ -187,6 +188,98 @@ class EnhancementContractTest(unittest.TestCase):
 
         self.assertEqual(load_calls, ["model-dir"])
         self.assertTrue(all(backend is loaded_backend for backend in backends))
+
+    def test_enhancer_fingerprint_reports_sanitized_config_and_checkpoint_hashes(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            config = model_dir / "config.ini"
+            checkpoint = checkpoint_dir / "model_120.ckpt.best"
+            older_checkpoint = checkpoint_dir / "model_7.ckpt.best"
+            config.write_bytes(b"config")
+            checkpoint.write_bytes(b"checkpoint-120")
+            older_checkpoint.write_bytes(b"checkpoint-7")
+
+            fingerprint = enhance.get_enhancer_model_fingerprint(str(model_dir))
+
+        self.assertEqual(fingerprint["model_name"], "DeepFilterNet3")
+        self.assertEqual(fingerprint["model_dir_name"], "DeepFilterNet3")
+        self.assertEqual(fingerprint["config_path"], "config.ini")
+        self.assertEqual(fingerprint["checkpoint_path"], "checkpoints/model_120.ckpt.best")
+        self.assertEqual(fingerprint["config_sha256"], sha256(b"config").hexdigest())
+        self.assertEqual(
+            fingerprint["checkpoint_sha256"],
+            sha256(b"checkpoint-120").hexdigest(),
+        )
+        for value in fingerprint.values():
+            if isinstance(value, str):
+                self.assertNotIn(temp_dir, value)
+
+    def test_enhancer_fingerprint_mismatch_fails_before_caching_backend(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            (model_dir / "config.ini").write_bytes(b"config")
+            (checkpoint_dir / "model_120.ckpt.best").write_bytes(b"checkpoint")
+
+            with (
+                mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
+                mock.patch.object(enhance, "_ENHANCER_MODEL_DIR", None),
+                mock.patch.object(enhance, "_ENHANCER_FINGERPRINT_KEY", None),
+                mock.patch.object(enhance, "_DeepFilterNetBackend") as backend_loader,
+            ):
+                with self.assertRaises(EnhancementError):
+                    enhance.load_enhancer(
+                        str(model_dir),
+                        expected_fingerprint={
+                            "config_sha256": "0" * 64,
+                            "checkpoint_sha256": sha256(b"checkpoint").hexdigest(),
+                        },
+                    )
+
+        backend_loader.assert_not_called()
+        self.assertIsNone(enhance._ENHANCER_BACKEND)
+
+    def test_enhancer_correct_fingerprint_does_not_force_duplicate_load(self) -> None:
+        from core import enhance
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "DeepFilterNet3"
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            (model_dir / "config.ini").write_bytes(b"config")
+            (checkpoint_dir / "model_120.ckpt.best").write_bytes(b"checkpoint")
+            loaded_backend = object()
+            load_calls: list[str | None] = []
+
+            def fake_backend(model_dir_arg: str | None):
+                load_calls.append(model_dir_arg)
+                return loaded_backend
+
+            expected = {
+                "config_sha256": sha256(b"config").hexdigest(),
+                "checkpoint_sha256": sha256(b"checkpoint").hexdigest(),
+            }
+            with (
+                mock.patch.object(enhance, "_ENHANCER_BACKEND", None),
+                mock.patch.object(enhance, "_ENHANCER_MODEL_DIR", None),
+                mock.patch.object(enhance, "_ENHANCER_FINGERPRINT_KEY", None),
+                mock.patch.object(enhance, "_DeepFilterNetBackend", side_effect=fake_backend),
+            ):
+                first = enhance.load_enhancer(
+                    str(model_dir), expected_fingerprint=expected
+                )
+                second = enhance.load_enhancer(str(model_dir))
+
+        self.assertIs(first, loaded_backend)
+        self.assertIs(second, loaded_backend)
+        self.assertEqual(load_calls, [str(model_dir)])
 
 
 if __name__ == "__main__":

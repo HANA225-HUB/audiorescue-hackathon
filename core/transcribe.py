@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,17 +17,28 @@ DEFAULT_DEVICE = "auto"
 
 _ASR_MODEL: Any | None = None
 _ASR_KEY: tuple[str, str] | None = None
+_ASR_FINGERPRINT_KEY: tuple[tuple[str, str], ...] | None = None
 _ASR_LOCK = threading.Lock()
 
 
-def load_asr(model_name: str, device: str):
+def load_asr(
+    model_name: str,
+    device: str,
+    *,
+    expected_fingerprint: Mapping[str, str] | None = None,
+):
     """Load and memoize one Whisper model for this process."""
 
-    global _ASR_MODEL, _ASR_KEY
+    global _ASR_MODEL, _ASR_KEY, _ASR_FINGERPRINT_KEY
     normalized_model = _validated_text(model_name, "model_name")
     resolved_device = _resolve_device(device)
     key = (normalized_model, resolved_device)
+    expected_key = _fingerprint_key(expected_fingerprint)
     with _ASR_LOCK:
+        if expected_fingerprint is not None:
+            verify_asr_model_fingerprint(
+                expected_fingerprint, normalized_model, resolved_device
+            )
         if _ASR_MODEL is not None and _ASR_KEY == key:
             return _ASR_MODEL
         try:
@@ -42,6 +56,7 @@ def load_asr(model_name: str, device: str):
             raise ASRInferenceError("Whisper 模型加载失败", detail=str(exc)) from exc
         _ASR_MODEL = loaded_model
         _ASR_KEY = key
+        _ASR_FINGERPRINT_KEY = expected_key
         return loaded_model
 
 
@@ -100,6 +115,46 @@ def _serialize_segments(raw_segments: Any) -> list[TranscriptSegment]:
     return segments
 
 
+def get_asr_model_fingerprint(model_name: str, device: str = DEFAULT_DEVICE) -> dict[str, str]:
+    """Return sanitized Whisper checkpoint SHA-256 evidence."""
+
+    normalized_model = _validated_text(model_name, "model_name")
+    resolved_device = _resolve_device(device)
+    checkpoint_path = _resolve_whisper_checkpoint_path(normalized_model)
+    model_label = (
+        checkpoint_path.stem
+        if Path(normalized_model).expanduser().is_file()
+        else normalized_model
+    )
+    if not checkpoint_path.is_file():
+        raise ASRInferenceError(
+            "Whisper checkpoint is missing",
+            details={"checkpoint_path": checkpoint_path.name},
+        )
+    return {
+        "model_name": f"whisper-{model_label}",
+        "device": resolved_device,
+        "checkpoint_path": checkpoint_path.name,
+        "checkpoint_sha256": _sha256_file(checkpoint_path),
+    }
+
+
+def verify_asr_model_fingerprint(
+    expected_fingerprint: Mapping[str, str],
+    model_name: str,
+    device: str = DEFAULT_DEVICE,
+) -> dict[str, str]:
+    """Return actual fingerprint or fail closed on expected hash mismatch."""
+
+    fingerprint = get_asr_model_fingerprint(model_name, device)
+    _assert_expected_fingerprint(
+        fingerprint,
+        expected_fingerprint,
+        required_keys=("checkpoint_sha256",),
+    )
+    return fingerprint
+
+
 def _resolve_device(device: str) -> str:
     normalized_device = _validated_text(device, "device").lower()
     if normalized_device != "auto":
@@ -118,4 +173,70 @@ def _validated_text(value: Any, field_name: str) -> str:
     return value.strip()
 
 
-__all__ = ["load_asr", "transcribe_audio"]
+def _resolve_whisper_checkpoint_path(model_name: str) -> Path:
+    candidate = Path(model_name).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    try:
+        import whisper
+    except Exception as exc:  # pragma: no cover - depends on optional runtime deps.
+        raise ASRInferenceError(
+            "Whisper dependency is unavailable",
+            detail=str(exc),
+        ) from exc
+    if model_name not in getattr(whisper, "_MODELS", {}):
+        raise ASRInferenceError(
+            "Whisper model name is not recognized",
+            details={"model_name": model_name},
+        )
+    default_cache = Path.home() / ".cache"
+    cache_root = Path(os.getenv("XDG_CACHE_HOME", str(default_cache))) / "whisper"
+    return (cache_root / f"{model_name}.pt").expanduser().resolve()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_expected_fingerprint(
+    actual: Mapping[str, str],
+    expected: Mapping[str, str],
+    *,
+    required_keys: tuple[str, ...],
+) -> None:
+    for key in required_keys:
+        wanted = str(expected.get(key, "")).strip().lower()
+        if not wanted:
+            continue
+        got = str(actual.get(key, "")).strip().lower()
+        if got != wanted:
+            raise ASRInferenceError(
+                "Model fingerprint mismatch",
+                details={
+                    "field": key,
+                    "expected_sha256": wanted,
+                    "actual_sha256": got,
+                },
+            )
+
+
+def _fingerprint_key(
+    expected_fingerprint: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...] | None:
+    if expected_fingerprint is None:
+        return None
+    return tuple(
+        sorted((str(key), str(value)) for key, value in expected_fingerprint.items())
+    )
+
+
+__all__ = [
+    "get_asr_model_fingerprint",
+    "load_asr",
+    "transcribe_audio",
+    "verify_asr_model_fingerprint",
+]

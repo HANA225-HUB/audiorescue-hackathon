@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 import time
+from collections.abc import Mapping
 from numbers import Real
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from core.schemas import (
 
 _ENHANCER_BACKEND: Any | None = None
 _ENHANCER_MODEL_DIR: str | None = None
+_ENHANCER_FINGERPRINT_KEY: tuple[tuple[str, str], ...] | None = None
 _ENHANCER_LOCK = threading.Lock()
 
 
@@ -38,10 +41,8 @@ class _DeepFilterNetBackend:
             ) from exc
 
         try:
-            if model_dir:
-                model, df_state, _ = init_df(model_base_dir=model_dir)
-            else:
-                model, df_state, _ = init_df()
+            resolved_model_dir = _resolve_deepfilternet_model_dir(model_dir)
+            model, df_state, _ = init_df(model_base_dir=str(resolved_model_dir))
         except Exception as exc:  # pragma: no cover - model availability is environment-specific.
             raise EnhancementError("DeepFilterNet 模型加载失败", detail=str(exc)) from exc
 
@@ -51,6 +52,7 @@ class _DeepFilterNetBackend:
         self._model = model
         self._df_state = df_state
         self._sample_rate = int(df_state.sr())
+        self.fingerprint = get_enhancer_model_fingerprint(str(resolved_model_dir))
 
     def enhance_file(self, input_wav: str, output_full_wav: str) -> None:
         audio, _ = self._load_audio(input_wav, sr=self._sample_rate)
@@ -58,16 +60,24 @@ class _DeepFilterNetBackend:
         self._save_audio(output_full_wav, enhanced, self._sample_rate)
 
 
-def load_enhancer(model_dir: str | None = None):
+def load_enhancer(
+    model_dir: str | None = None,
+    *,
+    expected_fingerprint: Mapping[str, str] | None = None,
+):
     """Load and memoize the DeepFilterNet backend for this process."""
 
-    global _ENHANCER_BACKEND, _ENHANCER_MODEL_DIR
+    global _ENHANCER_BACKEND, _ENHANCER_MODEL_DIR, _ENHANCER_FINGERPRINT_KEY
+    expected_key = _fingerprint_key(expected_fingerprint)
     with _ENHANCER_LOCK:
+        if expected_fingerprint is not None:
+            verify_enhancer_model_fingerprint(expected_fingerprint, model_dir)
         if _ENHANCER_BACKEND is not None and _ENHANCER_MODEL_DIR == model_dir:
             return _ENHANCER_BACKEND
         loaded_backend = _DeepFilterNetBackend(model_dir)
         _ENHANCER_BACKEND = loaded_backend
         _ENHANCER_MODEL_DIR = model_dir
+        _ENHANCER_FINGERPRINT_KEY = expected_key
         return loaded_backend
 
 
@@ -164,6 +174,53 @@ def _match_length(samples: np.ndarray, target_frames: int) -> np.ndarray:
     return np.pad(audio, (0, target_frames - audio.shape[0]))
 
 
+def get_enhancer_model_fingerprint(model_dir: str | None = None) -> dict[str, str]:
+    """Return sanitized DeepFilterNet config/checkpoint SHA-256 evidence."""
+
+    try:
+        resolved_model_dir = _resolve_deepfilternet_model_dir(model_dir)
+        config_path = resolved_model_dir / "config.ini"
+        checkpoint_path = _select_deepfilternet_checkpoint(
+            resolved_model_dir / "checkpoints"
+        )
+        if not config_path.is_file():
+            raise EnhancementError(
+                "DeepFilterNet config.ini is missing",
+                details={"model_dir_name": resolved_model_dir.name},
+            )
+        return {
+            "model_name": resolved_model_dir.name,
+            "model_dir_name": resolved_model_dir.name,
+            "config_path": "config.ini",
+            "config_sha256": _sha256_file(config_path),
+            "checkpoint_path": checkpoint_path.relative_to(
+                resolved_model_dir
+            ).as_posix(),
+            "checkpoint_sha256": _sha256_file(checkpoint_path),
+        }
+    except EnhancementError:
+        raise
+    except Exception as exc:
+        raise EnhancementError(
+            "DeepFilterNet fingerprint cannot be resolved", detail=str(exc)
+        ) from exc
+
+
+def verify_enhancer_model_fingerprint(
+    expected_fingerprint: Mapping[str, str],
+    model_dir: str | None = None,
+) -> dict[str, str]:
+    """Return actual fingerprint or fail closed on expected hash mismatch."""
+
+    fingerprint = get_enhancer_model_fingerprint(model_dir)
+    _assert_expected_fingerprint(
+        fingerprint,
+        expected_fingerprint,
+        required_keys=("config_sha256", "checkpoint_sha256"),
+    )
+    return fingerprint
+
+
 def _validate_output(path: Path) -> None:
     try:
         samples, _, _ = _read_wav(path)
@@ -180,4 +237,90 @@ def _validate_output(path: Path) -> None:
         )
 
 
-__all__ = ["enhance_audio", "load_enhancer"]
+def _resolve_deepfilternet_model_dir(model_dir: str | None = None) -> Path:
+    if model_dir:
+        return Path(model_dir).expanduser().resolve()
+    try:
+        from df.enhance import get_model_basedir
+    except Exception as exc:  # pragma: no cover - depends on optional runtime deps.
+        raise EnhancementError(
+            "DeepFilterNet dependency is unavailable",
+            detail=str(exc),
+        ) from exc
+    return Path(get_model_basedir("DeepFilterNet3")).expanduser().resolve()
+
+
+def _select_deepfilternet_checkpoint(checkpoint_dir: Path) -> Path:
+    if not checkpoint_dir.is_dir():
+        raise EnhancementError(
+            "DeepFilterNet checkpoints directory is missing",
+            details={"checkpoint_dir": "checkpoints"},
+        )
+    candidates = list(checkpoint_dir.glob("model*.ckpt.best"))
+    if not candidates:
+        candidates = list(checkpoint_dir.glob("model*.ckpt"))
+        candidates.extend(checkpoint_dir.glob("model*.ckpt.best"))
+    if not candidates:
+        raise EnhancementError(
+            "DeepFilterNet checkpoint is missing",
+            details={"checkpoint_dir": "checkpoints"},
+        )
+    return max(candidates, key=_checkpoint_epoch)
+
+
+def _checkpoint_epoch(path: Path) -> int:
+    try:
+        return int(path.name.split(".")[0].split("_")[-1])
+    except ValueError as exc:
+        raise EnhancementError(
+            "DeepFilterNet checkpoint name does not contain an epoch",
+            details={"checkpoint_name": path.name},
+        ) from exc
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_expected_fingerprint(
+    actual: Mapping[str, str],
+    expected: Mapping[str, str],
+    *,
+    required_keys: tuple[str, ...],
+) -> None:
+    for key in required_keys:
+        wanted = str(expected.get(key, "")).strip().lower()
+        if not wanted:
+            continue
+        got = str(actual.get(key, "")).strip().lower()
+        if got != wanted:
+            raise EnhancementError(
+                "Model fingerprint mismatch",
+                details={
+                    "field": key,
+                    "expected_sha256": wanted,
+                    "actual_sha256": got,
+                },
+            )
+
+
+def _fingerprint_key(
+    expected_fingerprint: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...] | None:
+    if expected_fingerprint is None:
+        return None
+    return tuple(
+        sorted((str(key), str(value)) for key, value in expected_fingerprint.items())
+    )
+
+
+__all__ = [
+    "enhance_audio",
+    "get_enhancer_model_fingerprint",
+    "load_enhancer",
+    "verify_enhancer_model_fingerprint",
+]
