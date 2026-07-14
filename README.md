@@ -28,7 +28,7 @@
 |---|---|
 | A | `core/audio_io.py`、`core/enhance.py`、`core/transcribe.py` 及对应测试 |
 | B | `app.py`、`ui/`、`core/visualize.py`、`core/text_diff.py` 及对应测试 |
-| C | `core/schemas.py`、`core/pipeline.py`、`core/metrics.py`、`core/cache.py`、配置、集成与文档 |
+| C | `core/schemas.py`、`core/pipeline.py`、`core/metrics.py`、`core/cache.py`、`scripts/`、配置、集成与文档 |
 
 禁止两个人同时让 AI 修改同一个文件。公共契约只能由 C 修改。
 
@@ -71,3 +71,87 @@ cd "$AUDIORESCUE_ROOT"
 - 每次任务：`outputs/{job_id}/`
 - 正式本地数据：`data_local/`，不会提交
 - 正式演示素材：仅经 C 审核后放入 `demo_assets/`
+
+## 正式录音数据工作流
+
+下列工具只使用本地 `data_local/`，不会把母带、冻结集或运行结果加入 Git。
+
+```bash
+# 1. 幂等初始化：可重复执行，不覆盖已有台账或音频
+python scripts/init_dataset.py --root data_local
+
+# 2. 原始 M4A/AAC/WAV 先放入 data_local/source_original/
+#    然后在 recording_metadata.csv 填 source_original_path
+#    录音进行中可只处理已就绪条目
+python scripts/standardize_recordings.py --data-root data_local --available-only
+
+# 3. 15 条母带全部就绪后运行最终严格模式
+python scripts/standardize_recordings.py --data-root data_local
+
+# 4. 在 recording_metadata.csv 中逐条确认 consent_status=yes；
+#    原始/标准化 SHA-256 必须已由上一步填写且保持匹配
+
+# 5. 生成 27 条固定混音和 33 行私有 manifest
+python scripts/build_dataset.py \
+  --dataset-root data_local \
+  --consent-or-license team-approved-for-competition-evaluation
+
+# 6. 校验 42 个 WAV、33 行语义、哈希、命名和授权状态
+python scripts/validate_dataset.py data_local
+```
+
+开发集可在 A/B 模块合入后批量运行：
+
+```bash
+python scripts/run_evaluation.py \
+  --manifest data_local/manifest.csv \
+  --dataset-root data_local \
+  --split dev \
+  --output-dir data_local/evaluations/dev_v1 \
+  --force-recompute
+```
+
+只在模型、强度、代码、授权和 33 行 manifest 全部完成，且 Git 工作区干净后冻结：
+
+```bash
+python scripts/freeze_experiment.py
+
+# locked_test 是一次性正式评测；这条命令不用来试跑
+python scripts/run_evaluation.py \
+  --manifest data_local/manifest.csv \
+  --dataset-root data_local \
+  --split locked_test \
+  --output-dir data_local/evaluations/locked_v1 \
+  --frozen-config data_local/config_frozen.json \
+  --confirm-locked \
+  --force-recompute
+```
+
+`locked_test` 运行前会再次核对 42 个 WAV / 33 行 manifest、音频 SHA-256、当前 Git commit、工作区、pipeline 配置和增强强度；9 条输入先复制到本次只读 staging，再创建消费回执。回执由冻结内容的规范身份生成并固定保存在 `data_local/.locked_receipts/`，复制、改名或重新排版 freeze JSON 不能获得第二次机会。需要修复崩溃时必须保留回执并创建明确的新实验版本，不得删除回执冒充首次评测。
+
+生成三人盲听包时，先准备一个私有 `pairs.csv`，每行指定同一样例的标准原轨与默认增强混合轨。可以填写绝对路径；相对路径会从 `pairs.csv` 所在目录解析：
+
+```csv
+sample_id,original_path,enhanced_path
+demo_01,/absolute/path/to/outputs/demo_01/original.wav,/absolute/path/to/outputs/demo_01/enhanced_mix.wav
+```
+
+然后生成三个随机、逐成员跨样例平衡的匿名试听包；每个人看到原轨位于 A/B 的次数差不超过 1。成员只拿各自的 `rater_A/B/C` 目录，答案表仅由 C 保管：
+
+```bash
+python scripts/prepare_blind_ab.py \
+  --pairs data_local/blind_ab/pairs.csv \
+  --output data_local/blind_ab/dev_v1
+```
+
+该工具只做随机、平衡和逐字节复制，不替成员判断听感。盲听完成前不要打开 `admin_keep_private/answer_key.csv`，也不要把私有参考文本、授权台账或答案表提交 Git。
+
+## 合入前最低检查
+
+```bash
+python -m unittest discover -s tests -q
+python -m py_compile scripts/*.py
+git diff --check
+```
+
+轻量契约与离线数据测试也会在 GitHub Actions 的 Python 3.10/3.11 环境运行。正式 DeepFilterNet/Whisper、GPU 性能和听感仍必须在 4090 与真实样例上单独验收。

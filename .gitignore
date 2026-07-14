@@ -42,5 +42,14 @@ logs/
 
 # Keep only deliberately committed test/demo WAV files
 *.wav
+*.m4a
+*.aac
+*.mp3
+*.flac
+*.aiff
+*.aif
+*.caf
+*.ogg
+*.opus
 !tests/fixtures/*.wav
 !demo_assets/*.wav

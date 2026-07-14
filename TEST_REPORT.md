@@ -19,6 +19,7 @@
 |---|---|---|---|
 | 2026-07-14 | C 本地 macOS / Python 3.13.3 / `codex/c-integration` | `python3 -m unittest discover -s tests -v` | 64/64 通过；使用假后端，不等于真实模型验收 |
 | 2026-07-14 | RTX 4090 / Ubuntu 22.04 / Python 3.10.8 / `1b05abb` | `python -m unittest discover -s tests -q` | 64/64 通过，工作树干净；使用假后端，不等于真实端到端验收 |
+| 2026-07-14 | C 本地 macOS / Python 3.13.3 / `codex/c-integration` | `python3 -m unittest discover -s tests -q` | 144/144 通过；新增母带转码、逐条授权哈希、固定混音、严格校验、freeze v2、locked 规范身份回执、输入 staging、防冻结集重标、盲听平衡与仓库安全测试；未使用正式录音，不代表效果验收 |
 
 ## 4090 环境验收
 
@@ -53,3 +54,6 @@ Whisper 开发样例实测文本为“今天下午三點,我們在實驗室討�
 - [ ] 断网重启三次并完成固定样例处理。
 - [ ] 1366x768 投屏、音量、下载和备用录屏验收。
 - [ ] 从干净目录按 README 重现启动。
+- [ ] 15 条母带完成授权登记并转码，`validate_dataset.py` 严格通过 42 个 WAV / 33 行 manifest。
+- [ ] `dev` 18 条完成批量推理；只在最终冻结后消费 9 条 `locked_test`。
+- [ ] 三人完成随机盲听表，答案揭盲后汇总偏好，不在试听前泄露 A/B 身份。

@@ -1,0 +1,52 @@
+name: C contract and dataset tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+      - "feature/**"
+
+permissions:
+  contents: read
+
+jobs:
+  c-contract-tests:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install lightweight contract dependency
+        run: python -m pip install "PyYAML>=6,<7"
+
+      - name: Run C contract and offline dataset tests
+        run: >-
+          python -m unittest -v
+          tests.test_cache
+          tests.test_demo_config
+          tests.test_events
+          tests.test_metrics
+          tests.test_pipeline
+          tests.test_pipeline_paths
+          tests.test_schemas
+          tests.test_init_dataset
+          tests.test_standardize_recordings
+          tests.test_build_dataset
+          tests.test_validate_dataset
+          tests.test_freeze_experiment
+          tests.test_run_evaluation
+          tests.test_prepare_blind_ab
+          tests.test_repo_safety
