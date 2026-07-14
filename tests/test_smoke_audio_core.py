@@ -194,9 +194,86 @@ class SmokeAudioCoreTest(unittest.TestCase):
 
         evidence = smoke._audio_rescue_error_evidence(error)
 
-        self.assertEqual(evidence["details"]["cache_path"], "model.bin")
-        self.assertEqual(evidence["details"]["checkpoint_dir"], "checkpoints")
+        self.assertEqual(evidence["details"]["cache_path"], "<redacted>")
+        self.assertEqual(evidence["details"]["checkpoint_dir"], "<redacted>")
         self.assertEqual(evidence["details"]["exception_type"], "ModuleNotFoundError")
+
+    def test_error_evidence_drops_unknown_free_text_recursively(self) -> None:
+        error = EnhancementError(
+            "failed",
+            details={
+                "stage": "enhance",
+                "component": "deepfilternet",
+                "exception_type": "RuntimeError",
+                "retryable": False,
+                "message": "今天下午三点，我们在实验室讨论语音处理项目的最终方案。",
+                "english_transcript": "please send help from the old lab recording",
+                "nested": {
+                    "notes": [
+                        "private transcript must not be printed",
+                        {"url": "https://example.test/audio.wav?token=secret"},
+                        {"path": "C:/private/cache/original_patient_file.wav"},
+                    ],
+                },
+                "very_long": "x" * 512,
+            },
+        )
+
+        evidence = smoke._audio_rescue_error_evidence(error)
+        rendered = json.dumps(evidence, ensure_ascii=False)
+
+        self.assertEqual(evidence["details"]["stage"], "enhance")
+        self.assertEqual(evidence["details"]["component"], "deepfilternet")
+        self.assertEqual(evidence["details"]["exception_type"], "RuntimeError")
+        self.assertFalse(evidence["details"]["retryable"])
+        self.assertNotIn("今天下午三点", rendered)
+        self.assertNotIn("please send help", rendered)
+        self.assertNotIn("private transcript", rendered)
+        self.assertNotIn("original_patient_file", rendered)
+        self.assertNotIn("example.test", rendered)
+        self.assertNotIn("x" * 64, rendered)
+
+    def test_main_returns_structured_error_without_free_text_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_wav = temp / "private_input.wav"
+            output_dir = temp / "private_outputs"
+            _write_pcm16_wav(input_wav)
+            stdout = io.StringIO()
+            argv = [
+                "smoke_audio_core.py",
+                "--input",
+                str(input_wav),
+                "--output-dir",
+                str(output_dir),
+            ]
+            error = EnhancementError(
+                "backend unavailable: private transcript must not be printed",
+                details={
+                    "stage": "enhance",
+                    "exception_type": "RuntimeError",
+                    "path": "C:/private/cache/source.wav",
+                    "message": "今天下午三点，我们在实验室讨论语音处理项目的最终方案。",
+                },
+            )
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "normalize_audio", side_effect=_fake_normalize),
+                mock.patch.object(smoke, "enhance_audio", side_effect=error),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = smoke.main()
+
+            payload = json.loads(stdout.getvalue())
+            rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["runs"][0]["error"]["code"], "ENHANCE_FAILED")
+        self.assertEqual(payload["runs"][0]["error"]["message"], "enhancement failed")
+        self.assertEqual(payload["runs"][0]["error"]["details"]["path"], "<redacted>")
+        self.assertNotIn("private transcript", rendered)
+        self.assertNotIn("今天下午三点", rendered)
+        self.assertNotIn("source.wav", rendered)
 
 
 if __name__ == "__main__":

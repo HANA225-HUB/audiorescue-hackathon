@@ -361,10 +361,43 @@ def _warning_to_dict(item) -> dict[str, Any]:
 def _audio_rescue_error_evidence(exc: AudioRescueError) -> dict[str, Any]:
     return {
         "code": exc.code.value,
-        "message": exc.public_message,
+        "message": _safe_error_message(exc),
         "module": exc.module,
         "details": _safe_details(exc.details),
     }
+
+
+_PATH_DETAIL_TOKENS = ("path", "dir", "cache", "file", "url", "uri")
+_SAFE_DETAIL_STRING_KEYS = {
+    "code",
+    "component",
+    "exception_type",
+    "module",
+    "stage",
+    "status",
+}
+_SAFE_DETAIL_BOOL_KEYS = {"recoverable", "retryable"}
+_SAFE_DETAIL_NUMBER_KEYS = {
+    "attempt",
+    "attempts",
+    "count",
+    "exit_code",
+    "run_index",
+}
+_SAFE_ERROR_MESSAGES = {
+    "INPUT_INVALID": "input audio is invalid",
+    "INPUT_TOO_LONG": "input audio is too long",
+    "ENHANCE_FAILED": "enhancement failed",
+    "OUTPUT_INVALID": "output audio is invalid",
+    "ASR_FAILED": "asr failed",
+    "VIS_FAILED": "visualization failed",
+    "INTERNAL_ERROR": "internal error",
+}
+_REDACTED = "<redacted>"
+
+
+def _safe_error_message(exc: AudioRescueError) -> str:
+    return _SAFE_ERROR_MESSAGES.get(exc.code.value, "audio processing failed")
 
 
 def _safe_details(value: Any) -> Any:
@@ -372,18 +405,56 @@ def _safe_details(value: Any) -> Any:
         safe: dict[str, Any] = {}
         for key, item in value.items():
             normalized_key = str(key)
-            if any(token in normalized_key.lower() for token in ("path", "dir", "cache")):
-                safe[normalized_key] = Path(str(item)).name if item is not None else None
-            else:
+            lower_key = normalized_key.lower()
+            if any(token in lower_key for token in _PATH_DETAIL_TOKENS):
+                safe[normalized_key] = _REDACTED if item is not None else None
+            elif lower_key in _SAFE_DETAIL_STRING_KEYS:
+                safe[normalized_key] = _safe_detail_string(item)
+            elif lower_key in _SAFE_DETAIL_BOOL_KEYS:
+                safe[normalized_key] = item if isinstance(item, bool) else _REDACTED
+            elif lower_key in _SAFE_DETAIL_NUMBER_KEYS:
+                safe[normalized_key] = item if _is_safe_number(item) else _REDACTED
+            elif isinstance(item, (Mapping, list, tuple)):
                 safe[normalized_key] = _safe_details(item)
+            elif item is None:
+                safe[normalized_key] = None
+            else:
+                safe[normalized_key] = _REDACTED
         return safe
     if isinstance(value, list):
         return [_safe_details(item) for item in value]
     if isinstance(value, tuple):
         return [_safe_details(item) for item in value]
-    if isinstance(value, (str, bool, int, float)) or value is None:
+    if isinstance(value, bool) or value is None:
         return value
+    if _is_safe_number(value):
+        return value
+    if isinstance(value, str):
+        return _REDACTED
     return type(value).__name__
+
+
+def _safe_detail_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return _REDACTED
+    if len(value) > 80:
+        return _REDACTED
+    if any(token in value.lower() for token in ("://", "\\", "/", "token=", "cache", "outputs")):
+        return _REDACTED
+    if not all(char.isascii() and (char.isalnum() or char in "._:-") for char in value):
+        return _REDACTED
+    return value
+
+
+def _is_safe_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == value
+        and value not in (float("inf"), float("-inf"))
+    )
 
 
 def _print_json(payload: dict[str, Any]) -> None:
