@@ -31,9 +31,9 @@ LATIN_SQUARE = {
 }
 
 REAL_RECORDINGS = (
-    ("A", "s01", "fan"),
-    ("B", "s02", "keyboard"),
-    ("C", "s03", "traffic"),
+    ("A", "s03", "traffic"),
+    ("B", "s01", "fan"),
+    ("C", "s02", "keyboard"),
 )
 
 DIRECTORIES = (
@@ -180,7 +180,7 @@ def _readme_text() -> str:
 - 不可变母带：`source_original/clean/spkA..C/`、`source_original/noise/`、`source_original/real/`
 - 9 条 clean：`raw/clean/spkA..C/clean_spkX_s01..s03.wav`
 - 3 条 noise：`raw/noise/noise_fan|keyboard|traffic_take01.wav`
-- 3 条 real：`raw/real/real_spkA_fan_r01.wav`、`real_spkB_keyboard_r01.wav`、`real_spkC_traffic_r01.wav`
+- 3 条 real：`raw/real/real_spkA_traffic_r01.wav`、`real_spkB_fan_r01.wav`、`real_spkC_keyboard_r01.wav`
 
 进入混音前，最终 WAV 必须是 48kHz、单声道、PCM16。clean 开头和结尾各保留约 0.5 秒；noise 为 45–60 秒且不得包含可辨认的未授权谈话。
 

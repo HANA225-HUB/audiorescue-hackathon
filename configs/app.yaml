@@ -17,6 +17,10 @@ audio:
 enhancement:
   backend: "deepfilternet"
   model: "DeepFilterNet3"
+  # Expected 4090 cache fingerprints. A's Round-2 task must verify the actual
+  # files at load time before these values can be treated as an enforced pin.
+  checkpoint_sha256: "23b92884f63ccf54bb026014604625ab231657b6480df65db4095c4c171e6003"
+  config_sha256: "415eb925d44990d938fb739f514aa3662c1ec0ea836cff044fa1291b82cb4290"
   default_strength: 0.75
   strengths:
     light: 0.50
@@ -28,6 +32,8 @@ enhancement:
 asr:
   backend: "openai-whisper"
   model: "base"
+  # Expected fingerprint; runtime fail-closed verification is tracked in A #3.
+  checkpoint_sha256: "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e"
   language: "zh"
   task: "transcribe"
   device: "auto"

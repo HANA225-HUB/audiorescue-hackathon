@@ -712,6 +712,8 @@ def _public_processing_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "enhancement": {
             "backend",
             "model",
+            "checkpoint_sha256",
+            "config_sha256",
             "default_strength",
             "strengths",
             "default_playback_track",
@@ -720,6 +722,7 @@ def _public_processing_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "asr": {
             "backend",
             "model",
+            "checkpoint_sha256",
             "language",
             "task",
             "device",

@@ -59,13 +59,13 @@ DEMO_SAMPLE_IDS = {
     "mix_spkB_s03_fan_snr000",
     "mix_spkC_s03_keyboard_snrm05",
     "clean_spkA_s03",
-    "real_spkC_traffic_r01",
+    "real_spkA_traffic_r01",
 }
 
 REAL_RECORDINGS = {
-    "A": ("S01", "fan"),
-    "B": ("S02", "keyboard"),
-    "C": ("S03", "traffic"),
+    "A": ("S03", "traffic"),
+    "B": ("S01", "fan"),
+    "C": ("S02", "keyboard"),
 }
 
 MANIFEST_FIELDS = (

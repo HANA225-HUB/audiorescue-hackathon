@@ -5,10 +5,10 @@ contract_version: "v0.1-contract"
 # full offline run. B must not hard-code paths outside this manifest.
 samples:
   - id: "DEV_SMOKE_S01_FAN"
-    name: "开发联调：风扇噪声普通话"
+    name: "开发联调：合成啁啾与风扇噪声"
     file: "tests/fixtures/dev_smoke_s01_fan.wav"
-    reference_text: "今天下午三点，我们在实验室讨论语音处理项目的最终方案。"
+    reference_text: null
     intended_use: "development_only"
     default: true
     enable_events: false
-    sha256: "18a97a227d5530a313186683962d377308c4b7f24d8e559362fd9d378261d3ae"
+    sha256: "ad849a4924f4fd4e8bb53f590bf70d99c99dae498836a569d1bff38e14ddef04"

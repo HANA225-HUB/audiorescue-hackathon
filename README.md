@@ -15,7 +15,7 @@
 - `v0.1-contract`：公共数据结构与 A 音频后端接口已经冻结；
 - C 集成分支已实现 `process_audio` 编排、中文 CER、透明缓存、P1 隔离壳、结果持久化与集成测试；
 - C 的自动测试使用确定性假后端，不代表 DeepFilterNet/Whisper 已完成真实推理验收；
-- 真实 P0 闭环仍需合并 A 的音频模块与 B 的页面/可视化模块后，在 4090 演示环境执行；
+- A 的音频模块与 B 的页面/可视化已合入；真实 P0 还需在当前 SHA 上用已授权语音完成 4090 merged E2E 与页面验收；
 - 本仓库当前为三人共享的公开仓库；只有受邀协作者可直接写入；
 - 模型、外部数据集、用户音频和运行产物不会提交到 Git；
 - `tests/fixtures/` 中的合成音频只用于联调，不作为比赛效果证据。
@@ -36,7 +36,7 @@
 
 1. 完整阅读 [`docs/A_BACKEND_CONTRACT_V1.md`](docs/A_BACKEND_CONTRACT_V1.md)；
 2. 只从 [`core/schemas.py`](core/schemas.py) 导入公共类型与异常；
-3. 使用 `tests/fixtures/dev_smoke_s01_fan.wav` 做第一次联调；
+3. 使用不含人声的 `tests/fixtures/dev_smoke_s01_fan.wav` 验证音频 I/O/增强，再用 `data_local` 内已授权的 S01/S02 录音验证双路 ASR；
 4. 先独立提交 A 的三个模块和测试，不修改 `pipeline.py`；
 5. 返回调用示例、真实输出、耗时、模型位置、已知问题和回滚方式。
 
@@ -100,7 +100,7 @@ python scripts/build_dataset.py \
 python scripts/validate_dataset.py data_local
 ```
 
-开发集可在 A/B 模块合入后批量运行：
+三段纯噪声补齐并生成开发集后，可批量运行：
 
 ```bash
 python scripts/run_evaluation.py \

@@ -1,8 +1,10 @@
 import csv
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.prepare_blind_ab import (
     BlindPair,
@@ -72,6 +74,37 @@ class PrepareBlindABTest(unittest.TestCase):
                     row["A_role"] == "original" for row in rater_rows
                 )
                 self.assertLessEqual(abs(original_as_a - (len(rater_rows) - original_as_a)), 1)
+
+    def test_default_assignment_seed_is_random_and_admin_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original = root / "original.wav"
+            enhanced = root / "enhanced.wav"
+            original.write_bytes(b"RIFF-original-audio")
+            enhanced.write_bytes(b"RIFF-enhanced-audio")
+            with mock.patch(
+                "scripts.prepare_blind_ab.secrets.randbits", return_value=987654321
+            ) as random_seed:
+                report = prepare_blind_test(
+                    [BlindPair("demo", original, enhanced)], root / "random"
+                )
+            random_seed.assert_called_once_with(128)
+            session = json.loads(
+                (report.output_root / "admin_keep_private" / "session.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(session["assignment_seed"], 987654321)
+            for rater in ("A", "B", "C"):
+                rater_root = report.output_root / f"rater_{rater}"
+                combined = "\n".join(
+                    path.read_text(encoding="utf-8", errors="ignore")
+                    for path in rater_root.rglob("*")
+                    if path.is_file() and path.suffix.lower() != ".wav"
+                ).lower()
+                self.assertNotIn("seed", combined)
+                self.assertNotIn("original_sha256", combined)
+                self.assertNotIn("a_role", combined)
 
     def test_repository_output_must_be_git_ignored(self) -> None:
         project_root = Path(__file__).resolve().parents[1]

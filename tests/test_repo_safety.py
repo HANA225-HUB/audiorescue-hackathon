@@ -19,6 +19,13 @@ PRIVATE_AUDIO_SUFFIXES = {
     ".caf",
     ".ogg",
     ".opus",
+    ".webm",
+    ".mp4",
+    ".mov",
+    ".3gp",
+    ".amr",
+    ".wma",
+    ".mkv",
 }
 LICENSE_COLUMNS = (
     "文件",
@@ -42,14 +49,17 @@ def tracked_paths() -> list[Path]:
     return [Path(item.decode("utf-8")) for item in output.split(b"\0") if item]
 
 
-def demo_license_problems(
-    project_root: Path, demo_audio_paths: list[Path]
+def audio_license_problems(
+    project_root: Path,
+    audio_paths: list[Path],
+    *,
+    ledger_relative: Path,
 ) -> list[str]:
-    """Return publication-gate failures for tracked demo audio."""
+    """Return publication-gate failures for one tracked audio collection."""
 
-    ledger_path = project_root / "demo_assets" / "LICENSES.md"
+    ledger_path = project_root / ledger_relative
     if not ledger_path.is_file():
-        return ["demo_assets/LICENSES.md is missing"]
+        return [f"{ledger_relative.as_posix()} is missing"]
 
     problems: list[str] = []
     records: dict[str, tuple[str, str, int]] = {}
@@ -88,7 +98,7 @@ def demo_license_problems(
     if not header_seen:
         problems.append("LICENSES.md is missing the required authorization table header")
 
-    for relative_path in demo_audio_paths:
+    for relative_path in audio_paths:
         repository_path = relative_path.as_posix()
         record = records.get(repository_path)
         if record is None:
@@ -116,6 +126,18 @@ def demo_license_problems(
             )
 
     return problems
+
+
+def demo_license_problems(
+    project_root: Path, demo_audio_paths: list[Path]
+) -> list[str]:
+    """Backward-compatible helper for the public demo gate tests."""
+
+    return audio_license_problems(
+        project_root,
+        demo_audio_paths,
+        ledger_relative=Path("demo_assets/LICENSES.md"),
+    )
 
 
 class RepositorySafetyTest(unittest.TestCase):
@@ -157,6 +179,24 @@ class RepositorySafetyTest(unittest.TestCase):
         tracked_demo = [
             path for path in tracked_audio if path.parts[:1] == ("demo_assets",)
         ]
+        tracked_fixtures = [
+            path for path in tracked_audio if path.parts[:2] == ("tests", "fixtures")
+        ]
+        if tracked_fixtures:
+            self.assertIn(
+                Path("tests/fixtures/LICENSES.md"),
+                tracked,
+                "fixture audio is tracked but its publication ledger is not tracked",
+            )
+        self.assertEqual(
+            audio_license_problems(
+                PROJECT_ROOT,
+                tracked_fixtures,
+                ledger_relative=Path("tests/fixtures/LICENSES.md"),
+            ),
+            [],
+            "tracked fixture audio failed the LICENSES.md publication gate",
+        )
         if tracked_demo:
             self.assertIn(
                 Path("demo_assets/LICENSES.md"),

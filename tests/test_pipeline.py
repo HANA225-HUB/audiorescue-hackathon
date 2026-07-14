@@ -193,10 +193,13 @@ class PipelineIntegrationTest(unittest.TestCase):
             },
             "enhancement": {
                 "model": "DeepFilterNet3",
+                "checkpoint_sha256": "a" * 64,
+                "config_sha256": "b" * 64,
                 "default_strength": 0.75,
             },
             "asr": {
                 "model": "base",
+                "checkpoint_sha256": "c" * 64,
                 "language": "zh",
                 "device": "cpu",
                 "temperature": 0.0,
@@ -307,6 +310,20 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(self.backend.normalize_calls, normalize_calls)
         self.assertEqual(set(self.output_root.iterdir()), job_directories)
         self.assertIn(ErrorCode.CACHE_USED, [item.code for item in second.warnings])
+
+    def test_model_fingerprint_change_invalidates_cache(self) -> None:
+        self.cache_enabled = True
+        self._write_config()
+        first = self.run_pipeline()
+        self.assertFalse(first.runtime.cache_hit)
+
+        config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        config["asr"]["checkpoint_sha256"] = "d" * 64
+        self.config_path.write_text(
+            yaml.safe_dump(config, allow_unicode=True), encoding="utf-8"
+        )
+        second = self.run_pipeline()
+        self.assertFalse(second.runtime.cache_hit)
 
     def test_incomplete_success_cache_is_a_miss_and_recomputes(self) -> None:
         self.cache_enabled = True

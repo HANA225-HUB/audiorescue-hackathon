@@ -66,7 +66,7 @@ def make_sources(root: Path, *, include_real: bool = True) -> None:
         )
 
     if include_real:
-        real_specs = (("A", "fan"), ("B", "keyboard"), ("C", "traffic"))
+        real_specs = (("A", "traffic"), ("B", "fan"), ("C", "keyboard"))
         for real_index, (speaker_id, noise_type) in enumerate(real_specs, start=1):
             samples = [
                 round(8_000 * math.sin(2 * math.pi * (5 + real_index) * index / 431))
@@ -303,7 +303,7 @@ class BuildDatasetTest(unittest.TestCase):
             root = Path(temp_dir) / "data_local"
             make_sources(root, include_real=False)
 
-            with self.assertRaisesRegex(DatasetBuildError, "real_spkA_fan_r01"):
+            with self.assertRaisesRegex(DatasetBuildError, "real_spkA_traffic_r01"):
                 build_dataset(root)
 
             rows = build_dataset(root, allow_missing_real=True)

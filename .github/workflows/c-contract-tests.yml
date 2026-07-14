@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - "codex/**"
+      - "feat/**"
       - "feature/**"
 
 permissions:
@@ -50,3 +51,32 @@ jobs:
           tests.test_run_evaluation
           tests.test_prepare_blind_ab
           tests.test_repo_safety
+
+  full-offline-ui-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install offline test and UI dependencies
+        run: >-
+          python -m pip install
+          "numpy==1.26.4"
+          "PyYAML>=6,<7"
+          "soundfile==0.12.1"
+          "matplotlib>=3.8,<4"
+          "gradio==5.49.1"
+
+      - name: Run the complete offline test suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the production Gradio page
+        env:
+          AUDIORESCUE_UI_FIXTURE: "0"
+        run: python -c "from ui.layout import build_demo; build_demo()"

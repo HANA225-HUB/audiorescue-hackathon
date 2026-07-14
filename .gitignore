@@ -51,5 +51,12 @@ logs/
 *.caf
 *.ogg
 *.opus
+*.webm
+*.mp4
+*.mov
+*.3gp
+*.amr
+*.wma
+*.mkv
 !tests/fixtures/*.wav
 !demo_assets/*.wav
