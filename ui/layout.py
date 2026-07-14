@@ -106,8 +106,14 @@ class OfflineHtmlResourceMiddleware:
 
 def offline_launch_app_kwargs() -> dict[str, Any]:
     from starlette.middleware import Middleware
+    from .file_delivery import FileDeliveryMiddleware
 
-    return {"middleware": [Middleware(OfflineHtmlResourceMiddleware)]}
+    return {
+        "middleware": [
+            Middleware(FileDeliveryMiddleware),
+            Middleware(OfflineHtmlResourceMiddleware),
+        ]
+    }
 
 
 def _first_fixture() -> str:
@@ -264,16 +270,10 @@ def build_demo():
         playback_note = gr.Markdown(elem_classes=["ar-panel", "ar-playback-note"])
 
         with gr.Row(equal_height=True, elem_classes=["ar-audio-grid"]):
-            original_audio = gr.Audio(
-                label="处理前：标准化原轨",
-                type="filepath",
-                interactive=False,
+            original_audio = gr.HTML(
                 elem_classes=["ar-audio"],
             )
-            enhanced_audio = gr.Audio(
-                label="增强后：混合增强轨",
-                type="filepath",
-                interactive=False,
+            enhanced_audio = gr.HTML(
                 elem_classes=["ar-audio"],
             )
 
@@ -288,16 +288,10 @@ def build_demo():
             cer = gr.Markdown(elem_classes=["ar-panel", "ar-cer-panel"])
 
         with gr.Row(equal_height=True, elem_classes=["ar-visual-grid"]):
-            spectrogram = gr.Image(
-                label="声谱图对照",
-                type="filepath",
-                interactive=False,
+            spectrogram = gr.HTML(
                 elem_classes=["ar-visual"],
             )
-            waveform = gr.Image(
-                label="波形对照",
-                type="filepath",
-                interactive=False,
+            waveform = gr.HTML(
                 elem_classes=["ar-visual"],
             )
 
@@ -308,20 +302,16 @@ def build_demo():
                 warnings = gr.HTML()
 
         with gr.Row(elem_classes=["ar-download-grid"]):
-            mixed_download = gr.File(
-                label="下载混合增强 WAV",
+            mixed_download = gr.HTML(
                 elem_classes=["ar-download"],
             )
-            full_download = gr.File(
-                label="下载 100% 增强 WAV",
+            full_download = gr.HTML(
                 elem_classes=["ar-download"],
             )
-            transcript_download = gr.File(
-                label="下载转写 TXT（待 pipeline 提供）",
+            transcript_download = gr.HTML(
                 elem_classes=["ar-download"],
             )
-            result_download = gr.File(
-                label="下载结果 JSON（待 pipeline 提供）",
+            result_download = gr.HTML(
                 elem_classes=["ar-download"],
             )
 

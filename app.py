@@ -7,7 +7,7 @@ mode is available only when the process explicitly opts in through
 
 from __future__ import annotations
 
-from ui.file_staging import default_staging_root
+from ui.file_delivery import FileDeliveryMiddleware
 from ui.layout import build_demo, strip_remote_html_resources
 
 
@@ -81,13 +81,17 @@ class OfflineHtmlResourceMiddleware:
 def offline_launch_app_kwargs():
     from starlette.middleware import Middleware
 
-    return {"middleware": [Middleware(OfflineHtmlResourceMiddleware)]}
+    return {
+        "middleware": [
+            Middleware(FileDeliveryMiddleware),
+            Middleware(OfflineHtmlResourceMiddleware),
+        ]
+    }
 
 
 def main() -> None:
     demo = build_demo()
     demo.launch(
-        allowed_paths=[str(default_staging_root())],
         app_kwargs=offline_launch_app_kwargs(),
         enable_monitoring=False,
     )

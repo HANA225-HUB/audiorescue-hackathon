@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import tempfile
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote
 
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
+from ui.file_delivery import clear_delivery_registry, lookup_delivery_entry
 from ui.presenters import (
     UI_TUPLE_KEYS,
     cer_markdown,
@@ -17,8 +19,20 @@ from ui.presenters import (
     result_to_view,
 )
 
+DELIVERY_URL_RE = re.compile(r"/audiorescue-files/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+")
+
+
+def _delivery_urls(fragment: object) -> list[str]:
+    return DELIVERY_URL_RE.findall(str(fragment))
+
 
 class PresenterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_delivery_registry()
+
+    def tearDown(self) -> None:
+        clear_delivery_registry()
+
     def test_all_process_result_fixtures_render(self) -> None:
         names = list_fixture_names()
         self.assertGreaterEqual(len(names), 5)
@@ -67,8 +81,9 @@ class PresenterTests(unittest.TestCase):
         result = load_fixture("process_result_failed_enhance")
         view = result_to_view(result)
         self.assertIn("急救未完成", view["status_md"])
-        self.assertIsNotNone(view["original_audio"])
-        self.assertIsNone(view["enhanced_audio"])
+        self.assertIn("<audio", view["original_audio"])
+        self.assertIn("未生成", view["enhanced_audio"])
+        self.assertNotIn("<audio", view["enhanced_audio"])
         self.assertIn("ENHANCE_FAILED", view["warnings_html"])
 
     def test_no_reference_means_no_cer_number(self) -> None:
@@ -136,8 +151,10 @@ class PresenterTests(unittest.TestCase):
     def test_txt_and_json_downloads_are_placeholders_until_pipeline_contracts_paths(self) -> None:
         result = load_fixture("process_result_ok")
         view = result_to_view(result)
-        self.assertIsNone(view["transcript_download"])
-        self.assertIsNone(view["result_download"])
+        self.assertIn("未生成", view["transcript_download"])
+        self.assertIn("未生成", view["result_download"])
+        self.assertEqual(_delivery_urls(view["transcript_download"]), [])
+        self.assertEqual(_delivery_urls(view["result_download"]), [])
 
     def test_cer_direction_labels_improvement_tie_and_regression(self) -> None:
         result = load_fixture("process_result_ok")
@@ -154,8 +171,10 @@ class PresenterTests(unittest.TestCase):
         result["original_audio_path"] = "/etc/hosts"
         result["mixed_output_path"] = "/etc/hosts"
         view = result_to_view(result)
-        self.assertIsNone(view["original_audio"])
-        self.assertIsNone(view["enhanced_audio"])
+        self.assertIn("未生成", view["original_audio"])
+        self.assertIn("未生成", view["enhanced_audio"])
+        self.assertNotIn("/etc/hosts", view["original_audio"])
+        self.assertNotIn("/etc/hosts", view["enhanced_audio"])
         self.assertNotIn("/etc/hosts", view["playback_note_md"])
 
     def test_invalid_job_id_fails_closed_without_any_allowed_root(self) -> None:
@@ -166,9 +185,9 @@ class PresenterTests(unittest.TestCase):
             "mixed_output_path": "/etc/hosts",
         }
         view = result_to_view(result)
-        self.assertIsNone(view["original_audio"])
-        self.assertIsNone(view["enhanced_audio"])
-        self.assertIsNone(view["mixed_download"])
+        self.assertIn("未生成", view["original_audio"])
+        self.assertIn("未生成", view["enhanced_audio"])
+        self.assertIn("未生成", view["mixed_download"])
 
     def test_warning_details_recursively_hide_path_and_trace_fields(self) -> None:
         result = {
@@ -251,12 +270,21 @@ class PresenterTests(unittest.TestCase):
             ):
                 view = result_to_view(result)
 
-            self.assertEqual(Path(view["original_audio"]).read_bytes(), b"original-content")
-            self.assertEqual(Path(view["enhanced_audio"]).read_bytes(), b"mixed-content")
-            self.assertEqual(Path(view["mixed_download"]).read_bytes(), b"mixed-content")
-            self.assertEqual(Path(view["full_download"]).read_bytes(), b"full-content")
-            self.assertEqual(Path(view["spectrogram_image"]).read_bytes(), b"spectrogram-content")
-            self.assertEqual(Path(view["waveform_image"]).read_bytes(), b"waveform-content")
+            expected_bytes = {
+                "original_audio": b"original-content",
+                "enhanced_audio": b"mixed-content",
+                "mixed_download": b"mixed-content",
+                "full_download": b"full-content",
+                "spectrogram_image": b"spectrogram-content",
+                "waveform_image": b"waveform-content",
+            }
+            for key, expected in expected_bytes.items():
+                with self.subTest(key=key):
+                    urls = _delivery_urls(view[key])
+                    self.assertEqual(len(set(urls)), 1)
+                    entry = lookup_delivery_entry(urls[0])
+                    self.assertIsNotNone(entry)
+                    self.assertEqual(entry.path.read_bytes(), expected)
 
             visible_text = "\n".join(
                 str(view[key])
@@ -268,7 +296,7 @@ class PresenterTests(unittest.TestCase):
                     "warnings_html",
                 )
             )
-            exposed_paths = unquote(
+            client_html = unquote(
                 " ".join(
                     str(view[key])
                     for key in (
@@ -281,13 +309,18 @@ class PresenterTests(unittest.TestCase):
                     )
                 )
             )
-            for rendered in (visible_text, exposed_paths):
+            for rendered in (visible_text, client_html):
                 self.assertNotIn("SECRET_WORKSPACE", rendered)
                 self.assertNotIn("SECRET_USER", rendered)
                 self.assertNotIn("outputs/safe_job", rendered)
                 self.assertNotIn("SECRET_USER_private_take.wav", rendered)
+                self.assertNotIn(str(root), rendered)
+                self.assertNotIn(str(staging_root), rendered)
+                self.assertNotIn("/gradio_api/file=", rendered)
+                self.assertNotIn("%2F", rendered)
+                self.assertNotIn("\\", rendered)
             self.assertIn("已隐藏文件名", visible_text)
-            self.assertTrue(Path(view["original_audio"]).is_relative_to(staging_root))
+            self.assertTrue(all(url.startswith("/audiorescue-files/") for url in _delivery_urls(client_html)))
 
     def test_status_markup_covers_input_error_fixture(self) -> None:
         rendered = result_to_view(load_fixture("process_result_input_error"))["status_md"]
@@ -344,9 +377,14 @@ class PresenterTests(unittest.TestCase):
             self.assertNotIn("SECRET_USER", rendered)
             self.assertNotIn("SECRET_WORKSPACE", rendered)
             self.assertNotIn("outputs/safe_job", rendered)
-            self.assertEqual(rendered.count("original.wav"), 50)
-            self.assertEqual(rendered.count("mixed.wav"), 100)
-            self.assertEqual(rendered.count("full.wav"), 50)
+            self.assertNotIn(str(root), rendered)
+            self.assertNotIn(str(staging_root), rendered)
+            self.assertNotIn("/gradio_api/file=", rendered)
+            self.assertNotIn("%2F", rendered)
+            self.assertTrue(all(url.startswith("/audiorescue-files/") for url in _delivery_urls(rendered)))
+            self.assertGreaterEqual(rendered.count("original.wav"), 50)
+            self.assertGreaterEqual(rendered.count("mixed.wav"), 50)
+            self.assertGreaterEqual(rendered.count("full.wav"), 50)
 
 
 if __name__ == "__main__":

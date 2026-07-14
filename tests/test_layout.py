@@ -7,6 +7,7 @@ from asyncio import run
 from unittest import mock
 
 from ui.presenters import UI_TUPLE_KEYS
+from ui.file_delivery import FileDeliveryMiddleware
 from ui.layout import (
     CSS_PATH,
     OfflineHtmlResourceMiddleware,
@@ -14,6 +15,7 @@ from ui.layout import (
     _run,
     _run_real_pipeline,
     build_demo,
+    offline_launch_app_kwargs,
     strip_remote_html_resources,
 )
 
@@ -154,6 +156,9 @@ class LayoutSafetyTest(unittest.TestCase):
         self.assertEqual(blocks_kwargs["theme"][2]["font"][0], "system-ui")
         labels = [str(kwargs.get("label", "")) for _, _, kwargs in calls]
         self.assertNotIn("开发专用：使用前端 fixture 假数据", labels)
+        self.assertEqual([kwargs.get("label") for kind, _, kwargs in calls if kind == "Audio"], ["上传音频"])
+        self.assertFalse(any(kind == "File" for kind, _, _ in calls))
+        self.assertFalse(any(kind == "Image" for kind, _, _ in calls))
         self.assertTrue(any(kind == "State" for kind, _, _ in calls))
         self.assertTrue(any(event == "click" for event, _, _ in events))
         self.assertFalse(any(event == "load" for event, _, _ in events))
@@ -201,6 +206,26 @@ class LayoutSafetyTest(unittest.TestCase):
 
         html_classes = [kwargs.get("elem_classes", []) for kind, _, kwargs in calls if kind == "HTML"]
         self.assertTrue(any("ar-status-panel" in classes for classes in html_classes))
+        self.assertTrue(any("ar-audio" in classes for classes in html_classes))
+        self.assertTrue(any("ar-download" in classes for classes in html_classes))
+
+    def test_direct_layout_launch_kwargs_keep_file_delivery_route(self) -> None:
+        class FakeMiddleware:
+            def __init__(self, cls):
+                self.cls = cls
+
+        fake_starlette = types.ModuleType("starlette")
+        fake_middleware = types.ModuleType("starlette.middleware")
+        fake_middleware.Middleware = FakeMiddleware
+        with mock.patch.dict(
+            sys.modules,
+            {"starlette": fake_starlette, "starlette.middleware": fake_middleware},
+        ):
+            middleware = offline_launch_app_kwargs()["middleware"]
+
+        self.assertEqual(len(middleware), 2)
+        self.assertIs(middleware[0].cls, FileDeliveryMiddleware)
+        self.assertIs(middleware[1].cls, OfflineHtmlResourceMiddleware)
 
     def test_offline_html_filter_removes_gradio_remote_defaults(self) -> None:
         html = """

@@ -94,6 +94,12 @@ def cleanup_stale_staging(
         except OSError:
             continue
         if age > ttl:
+            try:
+                from .file_delivery import invalidate_delivery_under
+
+                invalidate_delivery_under(child)
+            except Exception:
+                pass
             shutil.rmtree(child, ignore_errors=True)
 
 

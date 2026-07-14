@@ -15,7 +15,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .file_staging import resolve_allowed_file, stage_files_for_gradio
+from .file_delivery import register_files_for_delivery
+from .file_staging import default_staging_root, resolve_allowed_file, stage_files_for_gradio
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT_DIR / "tests" / "fixtures"
@@ -57,6 +58,14 @@ UI_TUPLE_KEYS = (
     "transcript_download",
     "result_download",
 )
+
+DELIVERY_FILENAMES = {
+    "original_audio": "original.wav",
+    "mixed_audio": "mixed.wav",
+    "full_audio": "full.wav",
+    "spectrogram_image": "spectrogram.png",
+    "waveform_image": "waveform.png",
+}
 
 
 def json_ready(value: Any) -> Any:
@@ -440,6 +449,85 @@ def warnings_html(result: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _empty_delivery_html(label: str) -> str:
+    return (
+        "<div class='empty-state ar-delivery-empty' "
+        f"data-delivery-role='{html.escape(label, quote=True)}'>未生成</div>"
+    )
+
+
+def _audio_delivery_html(
+    *,
+    title: str,
+    url: str | None,
+    filename: str,
+    role: str,
+    allow_download: bool = True,
+) -> str:
+    if not url:
+        return _empty_delivery_html(role)
+    safe_title = html.escape(title)
+    safe_url = html.escape(url, quote=True)
+    safe_filename = html.escape(filename, quote=True)
+    download = ""
+    if allow_download:
+        download = (
+            "<a class='ar-delivery-link' "
+            f"href='{safe_url}' download='{safe_filename}'>下载 {safe_filename}</a>"
+        )
+    return (
+        "<section class='ar-delivery-card ar-audio-card' "
+        f"data-delivery-role='{html.escape(role, quote=True)}'>"
+        f"<h3>{safe_title}</h3>"
+        f"<audio controls preload='metadata' src='{safe_url}'></audio>"
+        f"{download}"
+        "</section>"
+    )
+
+
+def _image_delivery_html(*, title: str, url: str | None, role: str) -> str:
+    if not url:
+        return _empty_delivery_html(role)
+    safe_title = html.escape(title)
+    safe_url = html.escape(url, quote=True)
+    return (
+        "<figure class='ar-delivery-card ar-visual-card' "
+        f"data-delivery-role='{html.escape(role, quote=True)}'>"
+        f"<img src='{safe_url}' alt='{safe_title}' loading='lazy'>"
+        f"<figcaption>{safe_title}</figcaption>"
+        "</figure>"
+    )
+
+
+def _download_delivery_html(
+    *,
+    title: str,
+    url: str | None,
+    filename: str,
+    role: str,
+    audio_preview: bool = False,
+) -> str:
+    if not url:
+        return _empty_delivery_html(role)
+    safe_title = html.escape(title)
+    safe_url = html.escape(url, quote=True)
+    safe_filename = html.escape(filename, quote=True)
+    audio = (
+        f"<audio controls preload='metadata' src='{safe_url}'></audio>"
+        if audio_preview
+        else ""
+    )
+    return (
+        "<section class='ar-delivery-card ar-download-card' "
+        f"data-delivery-role='{html.escape(role, quote=True)}'>"
+        f"<h3>{safe_title}</h3>"
+        f"{audio}"
+        "<a class='ar-delivery-link' "
+        f"href='{safe_url}' download='{safe_filename}'>下载 {safe_filename}</a>"
+        "</section>"
+    )
+
+
 def result_to_view(raw_result: Any) -> dict[str, Any]:
     result = as_dict(raw_result)
     if not result:
@@ -458,24 +546,58 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
         allowed_roots=allowed_roots,
         base_dir=ROOT_DIR,
     )
+    delivery_urls = register_files_for_delivery(
+        staged_files,
+        filenames_by_role=DELIVERY_FILENAMES,
+        allowed_roots=(default_staging_root(),),
+    )
     view = {
         "status_md": status_markdown(result),
         "input_md": input_markdown(result),
         "playback_note_md": playback_note_markdown(result),
-        "original_audio": staged_files["original_audio"],
-        "enhanced_audio": staged_files["mixed_audio"],
+        "original_audio": _audio_delivery_html(
+            title="处理前：标准化原轨",
+            url=delivery_urls["original_audio"],
+            filename=DELIVERY_FILENAMES["original_audio"],
+            role="original_audio",
+        ),
+        "enhanced_audio": _audio_delivery_html(
+            title="增强后：混合增强轨",
+            url=delivery_urls["mixed_audio"],
+            filename=DELIVERY_FILENAMES["mixed_audio"],
+            role="mixed_audio",
+        ),
         "transcript_before_md": transcript_markdown("处理前转写", result.get("transcript_before")),
         "transcript_after_md": transcript_markdown("增强后转写", result.get("transcript_after")),
         "diff_html": diff_html(result),
         "cer_md": cer_markdown(result),
-        "spectrogram_image": staged_files["spectrogram_image"],
-        "waveform_image": staged_files["waveform_image"],
+        "spectrogram_image": _image_delivery_html(
+            title="声谱图对照",
+            url=delivery_urls["spectrogram_image"],
+            role="spectrogram_image",
+        ),
+        "waveform_image": _image_delivery_html(
+            title="波形对照",
+            url=delivery_urls["waveform_image"],
+            role="waveform_image",
+        ),
         "runtime_md": runtime_markdown(result),
         "warnings_html": warnings_html(result),
-        "mixed_download": staged_files["mixed_audio"],
-        "full_download": staged_files["full_audio"],
-        "transcript_download": None,
-        "result_download": None,
+        "mixed_download": _download_delivery_html(
+            title="混合增强 WAV",
+            url=delivery_urls["mixed_audio"],
+            filename=DELIVERY_FILENAMES["mixed_audio"],
+            role="mixed_download",
+        ),
+        "full_download": _download_delivery_html(
+            title="100% 增强调试 WAV",
+            url=delivery_urls["full_audio"],
+            filename=DELIVERY_FILENAMES["full_audio"],
+            role="full_download",
+            audio_preview=True,
+        ),
+        "transcript_download": _empty_delivery_html("transcript_download"),
+        "result_download": _empty_delivery_html("result_download"),
     }
     return view
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import OfflineHtmlResourceMiddleware, offline_launch_app_kwargs
+from ui.file_delivery import FileDeliveryMiddleware, clear_delivery_registry, register_file_for_delivery
 from ui.file_staging import stage_files_for_gradio
 from ui.layout import strip_remote_html_resources
 
@@ -47,6 +48,12 @@ def _response_app(*, status=200, headers=(), chunks=()):
 
 
 class OfflineMiddlewareTest(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_delivery_registry()
+
+    def tearDown(self) -> None:
+        clear_delivery_registry()
+
     def test_launch_uses_offline_middleware(self) -> None:
         class FakeMiddleware:
             def __init__(self, cls):
@@ -60,8 +67,9 @@ class OfflineMiddlewareTest(unittest.TestCase):
             {"starlette": fake_starlette, "starlette.middleware": fake_middleware},
         ):
             middleware = offline_launch_app_kwargs()["middleware"]
-        self.assertEqual(len(middleware), 1)
-        self.assertIs(middleware[0].cls, OfflineHtmlResourceMiddleware)
+        self.assertEqual(len(middleware), 2)
+        self.assertIs(middleware[0].cls, FileDeliveryMiddleware)
+        self.assertIs(middleware[1].cls, OfflineHtmlResourceMiddleware)
 
     def test_non_html_payloads_are_byte_preserved(self) -> None:
         cases = [
@@ -220,6 +228,43 @@ class OfflineMiddlewareTest(unittest.TestCase):
             self.assertEqual(Path(staged["original_audio"]).read_bytes(), b"original-bytes")
             self.assertEqual(Path(staged["mixed_audio"]).read_bytes(), b"mixed-bytes")
             self.assertEqual(Path(staged["full_audio"]).read_bytes(), b"full-bytes")
+
+    def test_file_delivery_route_bypasses_html_filter_and_preserves_audio_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "original.wav"
+            source.write_bytes(
+                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/x.js"></script>RIFF'
+            )
+            url = register_file_for_delivery(
+                source,
+                filename="original.wav",
+                allowed_roots=(root,),
+            )
+            self.assertIsNotNone(url)
+
+            async def app(scope, receive, send):
+                await OfflineHtmlResourceMiddleware(
+                    lambda scope, receive, send: None
+                )(scope, receive, send)
+
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": str(url),
+                "raw_path": str(url).encode("ascii"),
+                "headers": [],
+                "query_string": b"",
+            }
+            run(FileDeliveryMiddleware(app)(scope, _receive, send))
+
+            self.assertEqual(sent[0]["status"], 200)
+            self.assertEqual(sent[-1]["body"], source.read_bytes())
 
 
 if __name__ == "__main__":
