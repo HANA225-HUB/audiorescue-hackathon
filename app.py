@@ -261,9 +261,11 @@ async function refresh() {
     document.getElementById("suggestion").textContent = state.suggestion || "暂无建议";
     const kindLabels = {
       answer: "问题回答",
+      continue_section: "继续当前内容",
       next_section: "下一段提示",
       clarify: "澄清建议",
-      correction: "修正提示"
+      correction: "修正提示",
+      close: "收尾提示"
     };
     const kind = kindLabels[state.suggestion_kind] || "待生成";
     const confidence = Number(state.confidence || 0);

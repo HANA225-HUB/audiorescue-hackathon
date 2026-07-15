@@ -376,6 +376,9 @@ class LiveMeetingAssistant:
 
     def _make_job(self, trigger: str, latest_text: str = "") -> _AdviceJob:
         session = self._session
+        if not str(latest_text).strip():
+            with self._lock:
+                latest_text = self._partial
         return _AdviceJob(
             preset=self.preset,
             context=self._context_text(),

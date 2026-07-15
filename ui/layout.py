@@ -43,9 +43,11 @@ MEETING_SCENARIO_CHOICES = [
 MEETING_SCENARIO_LABELS = dict((value, label) for label, value in MEETING_SCENARIO_CHOICES)
 SUGGESTION_KIND_LABELS = {
     "answer": "问题回答",
+    "continue_section": "继续当前内容",
     "next_section": "下一段提示",
     "clarify": "澄清建议",
     "correction": "修正提示",
+    "close": "收尾提示",
 }
 APP_JS = """
 () => {
@@ -1019,7 +1021,8 @@ def build_demo():
                         )
                         gr.Markdown(
                             "增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；"
-                            "生成建议时会把会议设置、最近转写和命中的资料文字片段发给千问。"
+                            "生成建议时会把会议设置、最近转写、资料形成的会前结构化概览"
+                            "和命中的资料文字片段发给千问。"
                             "资料在本地解析和检索，不上传原始 PDF/PPT/DOCX 文件；"
                             "短文档可能大部分进入命中片段；扫描 PDF 和 PPT 图片暂不 OCR。",
                             elem_classes=["ar-meeting-privacy-note"],
