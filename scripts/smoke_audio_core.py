@@ -46,8 +46,9 @@ def main() -> int:
     output_stream = sys.stdout
     with _CliLogCapture() as log_capture:
         try:
-            if _has_help_token(argv):
-                raise _ArgumentParseError("help_mixed")
+            help_like_reason = _classify_help_like_request(argv)
+            if help_like_reason is not None:
+                raise _ArgumentParseError(help_like_reason)
             args = parser.parse_args(argv)
             if args.runs < 1:
                 raise _ArgumentParseError("invalid_range")
@@ -65,7 +66,10 @@ def main() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(description="AudioRescue A-layer smoke test")
+    parser = _SafeArgumentParser(
+        description="AudioRescue A-layer smoke test",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "--input",
         default=str(ROOT / "tests" / "fixtures" / "dev_smoke_s01_fan.wav"),
@@ -132,8 +136,17 @@ def _is_pure_help_request(argv: list[str]) -> bool:
     return argv in (["-h"], ["--help"])
 
 
-def _has_help_token(argv: list[str]) -> bool:
-    return any(item in {"-h", "--help"} for item in argv)
+def _classify_help_like_request(argv: list[str]) -> str | None:
+    for item in argv:
+        if item in {"-h", "--help"}:
+            return "help_mixed"
+        if item.startswith("--help=") or _is_attached_short_help(item):
+            return "help_like"
+    return None
+
+
+def _is_attached_short_help(value: str) -> bool:
+    return value.startswith("-h") and value != "-h"
 
 
 def _pre_run_error_summary(exc: Exception) -> dict[str, Any]:

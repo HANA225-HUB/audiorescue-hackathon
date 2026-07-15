@@ -141,6 +141,7 @@ def _assert_safe_input_invalid(
     testcase.assertNotIn("Traceback", stdout)
     if marker is not None:
         _assert_marker_absent(testcase, rendered, marker)
+        _assert_marker_absent(testcase, stdout + stderr, marker)
 
 
 class SmokeAudioCoreTest(unittest.TestCase):
@@ -373,6 +374,40 @@ class SmokeAudioCoreTest(unittest.TestCase):
         ]
         for args, expected_reason, marker in cases:
             with self.subTest(args=args[:2]):
+                code, stdout, stderr = self._invoke_smoke(args)
+
+                _assert_safe_input_invalid(
+                    self,
+                    code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    expected_reason=expected_reason,
+                    marker=marker,
+                )
+
+    def test_cli_help_abbreviations_and_attached_forms_fail_closed(self) -> None:
+        encoded_marker = quote(_CLI_SECRET_MARKER, safe="")
+        double_encoded_marker = quote(encoded_marker, safe="")
+        cases = [
+            (["--h"], "unknown_argument", None),
+            (["--he"], "unknown_argument", None),
+            (["--hel"], "unknown_argument", None),
+            (["--h", _CLI_SECRET_MARKER], "unknown_argument", _CLI_SECRET_MARKER),
+            (["--", "--h", _CLI_SECRET_MARKER], "unknown_argument", _CLI_SECRET_MARKER),
+            (["-hx"], "help_like", None),
+            ([f"-h{_CLI_SECRET_MARKER}"], "help_like", _CLI_SECRET_MARKER),
+            ([f"-h={_CLI_SECRET_MARKER}"], "help_like", _CLI_SECRET_MARKER),
+            ([f"-h{encoded_marker}"], "help_like", _CLI_SECRET_MARKER),
+            ([f"-h{double_encoded_marker}"], "help_like", _CLI_SECRET_MARKER),
+            (["--help=" + _CLI_SECRET_MARKER], "help_like", _CLI_SECRET_MARKER),
+            (["--help=" + encoded_marker], "help_like", _CLI_SECRET_MARKER),
+            (["--help=" + double_encoded_marker], "help_like", _CLI_SECRET_MARKER),
+            (["--", f"-h{_CLI_SECRET_MARKER}"], "help_like", _CLI_SECRET_MARKER),
+            (["--runs", "1", f"-h{_CLI_SECRET_MARKER}"], "help_like", _CLI_SECRET_MARKER),
+            (["--help", "--", _CLI_SECRET_MARKER], "help_mixed", _CLI_SECRET_MARKER),
+        ]
+        for args, expected_reason, marker in cases:
+            with self.subTest(args=args[:1]):
                 code, stdout, stderr = self._invoke_smoke(args)
 
                 _assert_safe_input_invalid(
