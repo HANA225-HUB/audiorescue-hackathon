@@ -7,6 +7,7 @@ import re
 import secrets
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -58,6 +59,28 @@ def _default_ttl_seconds() -> int:
 
 def _safe_token() -> str:
     return secrets.token_urlsafe(24)
+
+
+def _is_valid_pcm_wav(path: Path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_rate = wav_file.getframerate()
+            sample_width = wav_file.getsampwidth()
+            frame_count = wav_file.getnframes()
+            if (
+                wav_file.getcomptype() != "NONE"
+                or channels <= 0
+                or sample_rate <= 0
+                or sample_width <= 0
+                or frame_count <= 0
+            ):
+                return False
+            expected_bytes = frame_count * channels * sample_width
+            data = wav_file.readframes(frame_count)
+            return len(data) == expected_bytes
+    except (EOFError, OSError, RuntimeError, wave.Error):
+        return False
 
 
 def _resolve_under_allowed_roots(path_value: Any, allowed_roots: tuple[Path, ...]) -> Path | None:
@@ -152,6 +175,8 @@ def register_file_for_delivery(
     except OSError:
         return None
     if not resolved.is_file() or resolved.is_symlink():
+        return None
+    if Path(neutral_name).suffix.lower() in {".wav", ".wave"} and not _is_valid_pcm_wav(resolved):
         return None
 
     timestamp = time.time() if now is None else now

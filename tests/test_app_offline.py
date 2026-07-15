@@ -2,6 +2,7 @@ import tempfile
 import sys
 import types
 import unittest
+import wave
 from asyncio import run
 from pathlib import Path
 from unittest import mock
@@ -10,6 +11,20 @@ from app import OfflineHtmlResourceMiddleware, offline_launch_app_kwargs
 from ui.file_delivery import FileDeliveryMiddleware, clear_delivery_registry, register_file_for_delivery
 from ui.file_staging import stage_files_for_gradio
 from ui.layout import strip_remote_html_resources
+
+
+def _write_pcm_wav(
+    path: Path,
+    frames: bytes = b"\x00\x00\x01\x00",
+    *,
+    sample_width: int = 2,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(48000)
+        wav_file.writeframes(frames)
 
 
 async def _receive():
@@ -210,9 +225,12 @@ class OfflineMiddlewareTest(unittest.TestCase):
             original = root / "original.wav"
             mixed = root / "mixed.wav"
             full = root / "full.wav"
-            original.write_bytes(b"original-bytes")
-            mixed.write_bytes(b"mixed-bytes")
-            full.write_bytes(b"full-bytes")
+            _write_pcm_wav(original, b"original-bytes", sample_width=1)
+            _write_pcm_wav(mixed, b"mixed-bytes", sample_width=1)
+            _write_pcm_wav(full, b"full-bytes", sample_width=1)
+            original_bytes = original.read_bytes()
+            mixed_bytes = mixed.read_bytes()
+            full_bytes = full.read_bytes()
 
             staged = stage_files_for_gradio(
                 {
@@ -225,16 +243,18 @@ class OfflineMiddlewareTest(unittest.TestCase):
                 staging_root=staging,
             )
 
-            self.assertEqual(Path(staged["original_audio"]).read_bytes(), b"original-bytes")
-            self.assertEqual(Path(staged["mixed_audio"]).read_bytes(), b"mixed-bytes")
-            self.assertEqual(Path(staged["full_audio"]).read_bytes(), b"full-bytes")
+            self.assertEqual(Path(staged["original_audio"]).read_bytes(), original_bytes)
+            self.assertEqual(Path(staged["mixed_audio"]).read_bytes(), mixed_bytes)
+            self.assertEqual(Path(staged["full_audio"]).read_bytes(), full_bytes)
 
     def test_file_delivery_route_bypasses_html_filter_and_preserves_audio_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "original.wav"
-            source.write_bytes(
-                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/x.js"></script>RIFF'
+            _write_pcm_wav(
+                source,
+                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/x.js"></script>RIFF',
+                sample_width=1,
             )
             url = register_file_for_delivery(
                 source,

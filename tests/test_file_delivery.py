@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import wave
 from asyncio import run
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,6 +18,56 @@ from ui.file_delivery import (
     register_files_for_delivery,
 )
 from ui.file_staging import cleanup_stale_staging
+
+
+def _write_pcm_wav(
+    path: Path,
+    frames: bytes = b"\x00\x00\x01\x00",
+    *,
+    sample_width: int = 2,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(48000)
+        wav_file.writeframes(frames)
+
+
+def _write_zero_frame_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(48000)
+
+
+def _write_truncated_wav(path: Path) -> None:
+    _write_pcm_wav(path, b"\x00\x00\x01\x00")
+    path.write_bytes(path.read_bytes()[:-1])
+
+
+def _write_float_wav_header(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = b"\x00" * 4
+    fmt = (
+        (3).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (48000).to_bytes(4, "little")
+        + (48000 * 4).to_bytes(4, "little")
+        + (4).to_bytes(2, "little")
+        + (32).to_bytes(2, "little")
+    )
+    path.write_bytes(
+        b"RIFF"
+        + (4 + 8 + len(fmt) + 8 + len(data)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + len(fmt).to_bytes(4, "little")
+        + fmt
+        + b"data"
+        + len(data).to_bytes(4, "little")
+        + data
+    )
 
 
 async def _receive():
@@ -73,7 +124,7 @@ class FileDeliveryTests(unittest.TestCase):
             root = Path(tmp) / "SECRET_WORKSPACE"
             source = root / "SECRET_USER_original.wav"
             root.mkdir()
-            source.write_bytes(b"audio-bytes")
+            _write_pcm_wav(source)
 
             first = register_file_for_delivery(
                 source,
@@ -99,6 +150,43 @@ class FileDeliveryTests(unittest.TestCase):
             self.assertNotIn(":", str(first))
             self.assertNotIn("file=", str(first))
             self.assertTrue(str(first).endswith("/original.wav"))
+
+    def test_rejects_invalid_wavs_before_registering_public_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cases = {
+                "empty": root / "empty.wav",
+                "random": root / "random.wav",
+                "zero_frame": root / "zero_frame.wav",
+                "truncated": root / "truncated.wav",
+                "non_pcm": root / "non_pcm.wav",
+                "malformed": root / "malformed.wav",
+            }
+            cases["empty"].write_bytes(b"")
+            cases["random"].write_bytes(b"not a wav")
+            _write_zero_frame_wav(cases["zero_frame"])
+            _write_truncated_wav(cases["truncated"])
+            _write_float_wav_header(cases["non_pcm"])
+            cases["malformed"].write_bytes(b"RIFF\x04\x00\x00\x00WAVE")
+
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    url = register_file_for_delivery(
+                        source,
+                        filename="original.wav",
+                        allowed_roots=(root,),
+                    )
+                    self.assertIsNone(url)
+
+            image = root / "spectrogram.png"
+            image.write_bytes(b"not validated as audio")
+            self.assertIsNotNone(
+                register_file_for_delivery(
+                    image,
+                    filename="spectrogram.png",
+                    allowed_roots=(root,),
+                )
+            )
 
     def test_bulk_registration_fails_closed_per_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,38 +215,42 @@ class FileDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "mixed.wav"
-            source.write_bytes(b"0123456789")
+            _write_pcm_wav(source, b"0123456789", sample_width=1)
+            body = source.read_bytes()
             url = register_file_for_delivery(source, filename="mixed.wav", allowed_roots=(root,))
             self.assertIsNotNone(url)
 
             get_sent = run(_request(str(url)))
             self.assertEqual(get_sent[0]["status"], 200)
-            self.assertEqual(get_sent[-1]["body"], b"0123456789")
+            self.assertEqual(get_sent[-1]["body"], body)
             headers = _headers(get_sent[0])
             self.assertEqual(headers[b"content-type"], b"audio/wav")
-            self.assertEqual(headers[b"content-length"], b"10")
+            self.assertEqual(headers[b"content-length"], str(len(body)).encode("ascii"))
             self.assertEqual(headers[b"accept-ranges"], b"bytes")
             self.assertIn(b'filename="mixed.wav"', headers[b"content-disposition"])
 
             head_sent = run(_request(str(url), method="HEAD"))
             self.assertEqual(head_sent[0]["status"], 200)
-            self.assertEqual(_headers(head_sent[0])[b"content-length"], b"10")
+            self.assertEqual(_headers(head_sent[0])[b"content-length"], str(len(body)).encode("ascii"))
             self.assertEqual(head_sent[-1]["body"], b"")
 
             range_sent = run(_request(str(url), headers=[(b"range", b"bytes=2-5")]))
             self.assertEqual(range_sent[0]["status"], 206)
-            self.assertEqual(range_sent[-1]["body"], b"2345")
+            self.assertEqual(range_sent[-1]["body"], body[2:6])
             range_headers = _headers(range_sent[0])
-            self.assertEqual(range_headers[b"content-range"], b"bytes 2-5/10")
+            self.assertEqual(
+                range_headers[b"content-range"],
+                f"bytes 2-5/{len(body)}".encode("ascii"),
+            )
             self.assertEqual(range_headers[b"content-length"], b"4")
 
             suffix_sent = run(_request(str(url), headers=[(b"range", b"bytes=-3")]))
             self.assertEqual(suffix_sent[0]["status"], 206)
-            self.assertEqual(suffix_sent[-1]["body"], b"789")
+            self.assertEqual(suffix_sent[-1]["body"], body[-3:])
 
             string_raw_path_sent = run(_request(str(url), raw_path=str(url)))
             self.assertEqual(string_raw_path_sent[0]["status"], 200)
-            self.assertEqual(string_raw_path_sent[-1]["body"], b"0123456789")
+            self.assertEqual(string_raw_path_sent[-1]["body"], body)
 
     def test_bad_ids_paths_queries_and_ranges_fail_closed_without_path_echo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +258,7 @@ class FileDeliveryTests(unittest.TestCase):
             marker = "SECRET_WORKSPACE"
             source = root / marker / "source.wav"
             source.parent.mkdir()
-            source.write_bytes(b"audio")
+            _write_pcm_wav(source)
             url = register_file_for_delivery(source, filename="original.wav", allowed_roots=(root,))
             self.assertIsNotNone(url)
             token = str(url).split("/")[2]
@@ -212,7 +304,7 @@ class FileDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "original.wav"
-            source.write_bytes(b"audio")
+            _write_pcm_wav(source)
             url = register_file_for_delivery(
                 source,
                 filename="original.wav",
@@ -226,13 +318,13 @@ class FileDeliveryTests(unittest.TestCase):
             self.assertEqual(expired[0]["status"], 410)
 
             deleted = root / "deleted.wav"
-            deleted.write_bytes(b"deleted")
+            _write_pcm_wav(deleted)
             deleted_url = register_file_for_delivery(deleted, filename="mixed.wav", allowed_roots=(root,))
             deleted.unlink()
             self.assertEqual(run(_request(str(deleted_url)))[0]["status"], 410)
 
             directory = root / "directory.wav"
-            directory.write_bytes(b"file")
+            _write_pcm_wav(directory)
             directory_url = register_file_for_delivery(
                 directory, filename="full.wav", allowed_roots=(root,)
             )
@@ -258,7 +350,7 @@ class FileDeliveryTests(unittest.TestCase):
             session = staging_root / ("a" * 32)
             session.mkdir(parents=True)
             source = session / "original.wav"
-            source.write_bytes(b"audio")
+            _write_pcm_wav(source)
             old_time = 100.0
             os.utime(session, (old_time, old_time))
             url = register_file_for_delivery(
@@ -286,8 +378,10 @@ class FileDeliveryTests(unittest.TestCase):
             second = root / "job-b" / "mixed.wav"
             first.parent.mkdir()
             second.parent.mkdir()
-            first.write_bytes(b"first-job")
-            second.write_bytes(b"second-job")
+            _write_pcm_wav(first, b"first-job", sample_width=1)
+            _write_pcm_wav(second, b"second-job", sample_width=1)
+            first_body = first.read_bytes()
+            second_body = second.read_bytes()
             first_url = register_file_for_delivery(first, filename="mixed.wav", allowed_roots=(root,))
             second_url = register_file_for_delivery(second, filename="mixed.wav", allowed_roots=(root,))
             self.assertNotEqual(first_url, second_url)
@@ -299,8 +393,8 @@ class FileDeliveryTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 bodies = list(pool.map(fetch, urls))
 
-            self.assertEqual(bodies[0::2], [b"first-job"] * 10)
-            self.assertEqual(bodies[1::2], [b"second-job"] * 10)
+            self.assertEqual(bodies[0::2], [first_body] * 10)
+            self.assertEqual(bodies[1::2], [second_body] * 10)
 
 
 if __name__ == "__main__":

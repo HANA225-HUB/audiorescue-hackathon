@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+import wave
 from asyncio import run
 from pathlib import Path
 from unittest import mock
@@ -77,6 +78,26 @@ def _css_variables(*, dark: bool = False) -> dict[str, str]:
     return dict(re.findall(r"(--ar-[\w-]+):\s*(#[0-9a-fA-F]{6})", body))
 
 
+def _write_pcm_wav(path: Path, frames: bytes = b"\x00\x00\x01\x00") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(48000)
+        wav_file.writeframes(frames)
+
+
+def _valid_transcript(text: str = "ok") -> dict[str, object]:
+    return {
+        "text": text,
+        "language": "zh",
+        "segments": [],
+        "runtime_seconds": 0.1,
+        "model_name": "whisper-base",
+        "error": None,
+    }
+
+
 class LayoutSafetyTest(unittest.TestCase):
     def test_competition_startup_uses_real_pipeline_by_default(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -147,8 +168,12 @@ class LayoutSafetyTest(unittest.TestCase):
             job_root.mkdir(parents=True)
             original = job_root / "original.wav"
             mixed = job_root / "mixed.wav"
-            original.write_bytes(b"original")
-            mixed.write_bytes(b"mixed")
+            spectrogram = job_root / "spectrogram.png"
+            waveform = job_root / "waveform.png"
+            _write_pcm_wav(original)
+            _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
+            spectrogram.write_bytes(b"spectrogram")
+            waveform.write_bytes(b"waveform")
 
             def fake_process_audio(**kwargs):
                 calls.append(kwargs)
@@ -159,6 +184,10 @@ class LayoutSafetyTest(unittest.TestCase):
                     "original_audio_path": str(original),
                     "mixed_output_path": str(mixed),
                     "enhanced_audio_path": str(mixed),
+                    "transcript_before": _valid_transcript("before"),
+                    "transcript_after": _valid_transcript("after"),
+                    "spectrogram_path": str(spectrogram),
+                    "waveform_path": str(waveform),
                     "warnings": [],
                     "events": [],
                     "config_snapshot": {},

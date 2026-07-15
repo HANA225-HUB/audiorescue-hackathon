@@ -4,11 +4,57 @@ import os
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote
 
-from ui.file_staging import cleanup_stale_staging, stage_files_for_gradio
+from ui.file_staging import cleanup_stale_staging, is_valid_pcm_wav, stage_files_for_gradio
+
+
+def _write_pcm_wav(path: Path, frames: bytes = b"\x00\x00\x01\x00") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(48000)
+        wav_file.writeframes(frames)
+
+
+def _write_zero_frame_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(48000)
+
+
+def _write_truncated_wav(path: Path) -> None:
+    _write_pcm_wav(path, b"\x00\x00\x01\x00")
+    path.write_bytes(path.read_bytes()[:-1])
+
+
+def _write_float_wav_header(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = b"\x00" * 4
+    fmt = (
+        (3).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (48000).to_bytes(4, "little")
+        + (48000 * 4).to_bytes(4, "little")
+        + (4).to_bytes(2, "little")
+        + (32).to_bytes(2, "little")
+    )
+    path.write_bytes(
+        b"RIFF"
+        + (4 + 8 + len(fmt) + 8 + len(data)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + len(fmt).to_bytes(4, "little")
+        + fmt
+        + b"data"
+        + len(data).to_bytes(4, "little")
+        + data
+    )
 
 
 class FileStagingTests(unittest.TestCase):
@@ -20,8 +66,10 @@ class FileStagingTests(unittest.TestCase):
             windows_style_source = source_root / "nested" / "C:\\SECRET_USER\\private_full.wav"
             posix_source.parent.mkdir(parents=True)
             windows_style_source.parent.mkdir(parents=True)
-            posix_source.write_bytes(b"original-bytes")
-            windows_style_source.write_bytes(b"full-bytes")
+            _write_pcm_wav(posix_source)
+            _write_pcm_wav(windows_style_source, b"\x02\x00\x03\x00")
+            expected_original = posix_source.read_bytes()
+            expected_full = windows_style_source.read_bytes()
 
             staged = stage_files_for_gradio(
                 {
@@ -35,8 +83,8 @@ class FileStagingTests(unittest.TestCase):
 
             original = Path(staged["original_audio"] or "")
             full = Path(staged["full_audio"] or "")
-            self.assertEqual(original.read_bytes(), b"original-bytes")
-            self.assertEqual(full.read_bytes(), b"full-bytes")
+            self.assertEqual(original.read_bytes(), expected_original)
+            self.assertEqual(full.read_bytes(), expected_full)
             self.assertEqual(original.name, "original.wav")
             self.assertEqual(full.name, "full.wav")
 
@@ -169,7 +217,8 @@ class FileStagingTests(unittest.TestCase):
             staging_root = Path(stage_tmp) / "ui-stage"
             source = root / "allowed" / "SECRET_USER_same.wav"
             source.parent.mkdir()
-            source.write_bytes(b"first")
+            _write_pcm_wav(source, b"\x01\x00\x02\x00")
+            first_bytes = source.read_bytes()
 
             first = stage_files_for_gradio(
                 {"original_audio": source},
@@ -177,7 +226,8 @@ class FileStagingTests(unittest.TestCase):
                 base_dir=root,
                 staging_root=staging_root,
             )
-            source.write_bytes(b"second")
+            _write_pcm_wav(source, b"\x03\x00\x04\x00")
+            second_bytes = source.read_bytes()
             second = stage_files_for_gradio(
                 {"original_audio": source},
                 allowed_roots=(source.parent,),
@@ -190,8 +240,8 @@ class FileStagingTests(unittest.TestCase):
             self.assertNotEqual(first_path.parent, second_path.parent)
             self.assertEqual(first_path.name, "original.wav")
             self.assertEqual(second_path.name, "original.wav")
-            self.assertEqual(first_path.read_bytes(), b"first")
-            self.assertEqual(second_path.read_bytes(), b"second")
+            self.assertEqual(first_path.read_bytes(), first_bytes)
+            self.assertEqual(second_path.read_bytes(), second_bytes)
 
     def test_missing_directory_or_disappearing_sources_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
@@ -217,7 +267,7 @@ class FileStagingTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "allowed" / "SECRET_USER_unreadable.wav"
             source.parent.mkdir()
-            source.write_bytes(b"secret")
+            _write_pcm_wav(source)
 
             with mock.patch("ui.file_staging.shutil.copyfile", side_effect=OSError("copy denied")):
                 staged = stage_files_for_gradio(
@@ -234,7 +284,7 @@ class FileStagingTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "allowed" / "SECRET_USER_original.wav"
             source.parent.mkdir()
-            source.write_bytes(b"secret")
+            _write_pcm_wav(source)
             staging_root = Path(stage_tmp) / "ui-stage"
 
             with mock.patch("ui.file_staging.os.chmod", side_effect=OSError("SECRET_USER")):
@@ -267,7 +317,7 @@ class FileStagingTests(unittest.TestCase):
                 sentinel = f"SECRET_USER_{index:02d}"
                 source = root / "outputs" / "job" / f"SECRET_WORKSPACE_{index:02d}" / f"{sentinel}.wav"
                 source.parent.mkdir(parents=True, exist_ok=True)
-                source.write_bytes(f"content-{index}".encode("ascii"))
+                _write_pcm_wav(source, index.to_bytes(2, "little") * 2)
                 staged = stage_files_for_gradio(
                     {"original_audio": source},
                     allowed_roots=(root / "outputs" / "job",),
@@ -281,6 +331,43 @@ class FileStagingTests(unittest.TestCase):
             self.assertNotIn("SECRET_WORKSPACE", decoded)
             self.assertNotIn("outputs/job", decoded)
             self.assertEqual(decoded.count("original.wav"), 50)
+
+    def test_rejects_invalid_wav_roles_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            invalid_root = root / "allowed"
+            invalid_root.mkdir()
+            cases = {
+                "empty": invalid_root / "empty.wav",
+                "random": invalid_root / "random.wav",
+                "zero_frame": invalid_root / "zero_frame.wav",
+                "truncated": invalid_root / "truncated.wav",
+                "non_pcm": invalid_root / "non_pcm.wav",
+                "malformed": invalid_root / "malformed.wav",
+            }
+            cases["empty"].write_bytes(b"")
+            cases["random"].write_bytes(b"not a wav")
+            _write_zero_frame_wav(cases["zero_frame"])
+            _write_truncated_wav(cases["truncated"])
+            _write_float_wav_header(cases["non_pcm"])
+            cases["malformed"].write_bytes(b"RIFF\x04\x00\x00\x00WAVE")
+
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    self.assertFalse(is_valid_pcm_wav(source))
+                    staged = stage_files_for_gradio(
+                        {
+                            "original_audio": source,
+                            "mixed_audio": source,
+                            "full_audio": source,
+                        },
+                        allowed_roots=(invalid_root,),
+                        base_dir=root,
+                        staging_root=Path(stage_tmp) / f"ui-stage-{name}",
+                    )
+                    self.assertIsNone(staged["original_audio"])
+                    self.assertIsNone(staged["mixed_audio"])
+                    self.assertIsNone(staged["full_audio"])
 
 
 if __name__ == "__main__":

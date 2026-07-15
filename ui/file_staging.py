@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 import uuid
+import wave
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,6 +22,8 @@ _ROLE_FILENAMES = {
     "spectrogram_image": "spectrogram.png",
     "waveform_image": "waveform.png",
 }
+
+_WAV_ROLES = {"original_audio", "mixed_audio", "full_audio"}
 
 
 def default_staging_root() -> Path:
@@ -116,6 +119,30 @@ def _prepare_session_dir(staging_root: Path) -> Path:
     raise RuntimeError("无法创建 UI staging 目录")
 
 
+def is_valid_pcm_wav(path: Path) -> bool:
+    """Return whether path is a non-empty, fully readable PCM WAV file."""
+
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_rate = wav_file.getframerate()
+            sample_width = wav_file.getsampwidth()
+            frame_count = wav_file.getnframes()
+            if (
+                wav_file.getcomptype() != "NONE"
+                or channels <= 0
+                or sample_rate <= 0
+                or sample_width <= 0
+                or frame_count <= 0
+            ):
+                return False
+            expected_bytes = frame_count * channels * sample_width
+            data = wav_file.readframes(frame_count)
+            return len(data) == expected_bytes
+    except (EOFError, OSError, RuntimeError, wave.Error):
+        return False
+
+
 def stage_files_for_gradio(
     paths_by_role: Mapping[str, Any],
     *,
@@ -141,6 +168,8 @@ def stage_files_for_gradio(
             base_dir=base_dir,
         )
         if resolved is not None:
+            if role in _WAV_ROLES and not is_valid_pcm_wav(resolved):
+                continue
             resolved_by_role[role] = resolved
 
     if not resolved_by_role:
@@ -157,6 +186,8 @@ def stage_files_for_gradio(
         try:
             shutil.copyfile(source, destination)
             os.chmod(destination, 0o600)
+            if role in _WAV_ROLES and not is_valid_pcm_wav(destination):
+                raise OSError
         except OSError:
             destination.unlink(missing_ok=True)
             staged[role] = None

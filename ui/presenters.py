@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from .file_delivery import register_files_for_delivery
-from .file_staging import default_staging_root, resolve_allowed_file, stage_files_for_gradio
+from .file_staging import (
+    default_staging_root,
+    is_valid_pcm_wav,
+    resolve_allowed_file,
+    stage_files_for_gradio,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT_DIR / "tests" / "fixtures"
@@ -95,6 +100,8 @@ UI_WARNING_CODES = {
     "UI_PIPELINE_FAILED",
     "UI_FILE_DELIVERY_FAILED",
     "UI_FILE_DELIVERY_OPTIONAL",
+    "UI_RESULT_INCOMPLETE",
+    "UI_WAV_INVALID",
 }
 
 WARNING_CODES = CORE_WARNING_CODES | UI_WARNING_CODES | {"UNKNOWN"}
@@ -124,6 +131,8 @@ WARNING_MESSAGES = {
     "UI_PIPELINE_FAILED": "真实处理管线调用失败，细节已隐藏。",
     "UI_FILE_DELIVERY_FAILED": "页面文件投递失败，相关播放器或下载已关闭。",
     "UI_FILE_DELIVERY_OPTIONAL": "调试文件投递失败，核心播放结果不受影响。",
+    "UI_RESULT_INCOMPLETE": "页面结果不完整，已按可用内容降级展示。",
+    "UI_WAV_INVALID": "音频文件不可播放，相关播放器或下载已关闭。",
     "UNKNOWN": "出现未分类警告，细节已隐藏。",
 }
 
@@ -137,7 +146,11 @@ WARNING_MODULES = {
     "cache",
     "events",
     "core",
+    "metrics",
+    "persistence",
+    "text_diff",
     "ui",
+    "visualize",
     "unknown",
 }
 
@@ -163,7 +176,15 @@ DETAIL_BOOL_KEYS = {"recoverable", "required", "cache_hit", "cold_start"}
 
 DETAIL_ENUM_VALUES = {
     "track": {"before", "after", "original", "mixed", "full"},
-    "role": {"original", "mixed", "full", "spectrogram", "waveform"},
+    "role": {
+        "original",
+        "mixed",
+        "full",
+        "spectrogram",
+        "waveform",
+        "transcript_before",
+        "transcript_after",
+    },
     "stage": {
         "input",
         "normalize",
@@ -174,11 +195,19 @@ DETAIL_ENUM_VALUES = {
         "events",
         "cache",
         "pipeline",
+        "presentation",
+        "delivery",
+        "staging",
         "ui",
     },
     "reason": {
         "missing",
         "unavailable",
+        "invalid_wav",
+        "result_incomplete",
+        "transcript_missing",
+        "visual_missing",
+        "visual_delivery_failed",
         "delivery_failed",
         "staging_failed",
         "registration_failed",
@@ -205,6 +234,7 @@ DELIVERY_ROLE_LABELS = {
     "spectrogram_image": "spectrogram",
     "waveform_image": "waveform",
 }
+WAV_DELIVERY_ROLES = ("original_audio", "mixed_audio", "full_audio")
 
 
 def json_ready(value: Any) -> Any:
@@ -724,10 +754,45 @@ def _register_delivery_urls(staged_files: dict[str, str | None]) -> dict[str, st
     return {role: urls.get(role) for role in DELIVERY_ROLES}
 
 
-def _delivery_warning(role: str, *, required: bool) -> dict[str, Any]:
+def _invalid_wav_roles(
+    paths_by_role: dict[str, Any],
+    staged_files: dict[str, str | None],
+    *,
+    allowed_roots: tuple[Path, ...],
+) -> set[str]:
+    invalid: set[str] = set()
+    for role in WAV_DELIVERY_ROLES:
+        staged = staged_files.get(role)
+        try:
+            if staged and not is_valid_pcm_wav(Path(staged)):
+                invalid.add(role)
+                continue
+            raw_path = paths_by_role.get(role)
+            if raw_path and staged is None:
+                resolved = resolve_allowed_file(
+                    raw_path,
+                    allowed_roots=allowed_roots,
+                    base_dir=ROOT_DIR,
+                )
+                if resolved is not None and not is_valid_pcm_wav(resolved):
+                    invalid.add(role)
+        except Exception:
+            continue
+    return invalid
+
+
+def _delivery_warning(
+    role: str,
+    *,
+    required: bool,
+    invalid_wav: bool = False,
+) -> dict[str, Any]:
     track = DELIVERY_ROLE_LABELS.get(role, "original")
+    code = "UI_WAV_INVALID" if invalid_wav else (
+        "UI_FILE_DELIVERY_FAILED" if required else "UI_FILE_DELIVERY_OPTIONAL"
+    )
     return {
-        "code": "UI_FILE_DELIVERY_FAILED" if required else "UI_FILE_DELIVERY_OPTIONAL",
+        "code": code,
         "message": "",
         "module": "ui",
         "recoverable": True,
@@ -735,7 +800,23 @@ def _delivery_warning(role: str, *, required: bool) -> dict[str, Any]:
             "track": track,
             "role": track,
             "required": required,
-            "reason": "delivery_failed",
+            "reason": "invalid_wav" if code == "UI_WAV_INVALID" else "delivery_failed",
+            "stage": "delivery",
+        },
+    }
+
+
+def _result_incomplete_warning(role: str, *, reason: str) -> dict[str, Any]:
+    return {
+        "code": "UI_RESULT_INCOMPLETE",
+        "message": "",
+        "module": "ui",
+        "recoverable": True,
+        "details": {
+            "role": role,
+            "required": True,
+            "reason": reason,
+            "stage": "presentation",
         },
     }
 
@@ -744,10 +825,54 @@ def _warning_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else []
 
 
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return number == number and number not in {float("inf"), float("-inf")}
+
+
+def _transcript_is_complete(value: Any) -> bool:
+    data = as_dict(value)
+    if not data:
+        return False
+    text = data.get("text")
+    language = data.get("language")
+    segments = data.get("segments")
+    model_name = data.get("model_name")
+    error = data.get("error")
+    if not isinstance(text, str):
+        return False
+    if language is not None and not isinstance(language, str):
+        return False
+    if not isinstance(segments, list):
+        return False
+    if not _finite_number(data.get("runtime_seconds")):
+        return False
+    if not isinstance(model_name, str) or not model_name.strip():
+        return False
+    if error not in (None, ""):
+        return False
+    for segment in segments:
+        item = as_dict(segment)
+        if (
+            not item
+            or not _finite_number(item.get("start"))
+            or not _finite_number(item.get("end"))
+            or not isinstance(item.get("text"), str)
+        ):
+            return False
+    return True
+
+
 def _presentation_status_and_warnings(
     result: dict[str, Any],
     paths_by_role: dict[str, Any],
     delivery_urls: dict[str, str | None],
+    invalid_wav_roles: set[str],
 ) -> tuple[str, list[dict[str, Any]]]:
     raw_status = _normalized_status(result.get("status"))
     ui_warnings: list[dict[str, Any]] = []
@@ -759,7 +884,13 @@ def _presentation_status_and_warnings(
     if raw_status in {"success", "partial"}:
         for role, delivered in required_ok.items():
             if not delivered:
-                ui_warnings.append(_delivery_warning(role, required=True))
+                ui_warnings.append(
+                    _delivery_warning(
+                        role,
+                        required=True,
+                        invalid_wav=role in invalid_wav_roles,
+                    )
+                )
         delivered_count = sum(1 for delivered in required_ok.values() if delivered)
         if delivered_count == len(REQUIRED_DELIVERY_ROLES):
             presentation_status = raw_status
@@ -771,10 +902,56 @@ def _presentation_status_and_warnings(
         presentation_status = "failed"
         for role in REQUIRED_DELIVERY_ROLES:
             if paths_by_role.get(role) and not delivery_urls.get(role):
-                ui_warnings.append(_delivery_warning(role, required=True))
+                ui_warnings.append(
+                    _delivery_warning(
+                        role,
+                        required=True,
+                        invalid_wav=role in invalid_wav_roles,
+                    )
+                )
 
-    if paths_by_role.get("full_audio") and not delivery_urls.get("full_audio"):
-        ui_warnings.append(_delivery_warning("full_audio", required=False))
+    if raw_status in {"success", "partial"} and not delivery_urls.get("full_audio"):
+        ui_warnings.append(
+            _delivery_warning(
+                "full_audio",
+                required=False,
+                invalid_wav="full_audio" in invalid_wav_roles,
+            )
+        )
+
+    if raw_status == "success":
+        incomplete = False
+        if not _transcript_is_complete(result.get("transcript_before")):
+            incomplete = True
+            ui_warnings.append(
+                _result_incomplete_warning(
+                    "transcript_before",
+                    reason="transcript_missing",
+                )
+            )
+        if not _transcript_is_complete(result.get("transcript_after")):
+            incomplete = True
+            ui_warnings.append(
+                _result_incomplete_warning(
+                    "transcript_after",
+                    reason="transcript_missing",
+                )
+            )
+        for role in ("spectrogram_image", "waveform_image"):
+            if not delivery_urls.get(role):
+                incomplete = True
+                ui_warnings.append(
+                    _result_incomplete_warning(
+                        DELIVERY_ROLE_LABELS[role],
+                        reason=(
+                            "visual_delivery_failed"
+                            if paths_by_role.get(role)
+                            else "visual_missing"
+                        ),
+                    )
+                )
+        if incomplete and presentation_status == "success":
+            presentation_status = "partial"
 
     return presentation_status, ui_warnings
 
@@ -795,10 +972,16 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
     }
     staged_files = _stage_result_files(paths_by_role, allowed_roots=allowed_roots)
     delivery_urls = _register_delivery_urls(staged_files)
+    invalid_wav_roles = _invalid_wav_roles(
+        paths_by_role,
+        staged_files,
+        allowed_roots=allowed_roots,
+    )
     presentation_status, ui_warnings = _presentation_status_and_warnings(
         result,
         paths_by_role,
         delivery_urls,
+        invalid_wav_roles,
     )
     display_result = {
         **result,
