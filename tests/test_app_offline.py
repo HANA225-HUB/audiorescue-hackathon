@@ -145,6 +145,10 @@ class OfflineMiddlewareTest(unittest.TestCase):
         self.assertEqual(sent[0]["status"], 200)
         self.assertIn("/audiorescue/live/state", body)
         self.assertIn("AudioRescue 悬浮提示窗", body)
+        self.assertIn('href="/"', body)
+        self.assertIn("返回主界面", body)
+        self.assertIn("window.opener.focus", body)
+        self.assertIn("window.close()", body)
 
     def test_non_html_payloads_are_byte_preserved(self) -> None:
         cases = [

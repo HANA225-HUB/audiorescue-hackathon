@@ -1,4 +1,5 @@
 import unittest
+import threading
 
 import numpy as np
 
@@ -14,10 +15,14 @@ from ui.live_controller import (
 
 
 class _FakeSoundDevice:
-    def __init__(self, devices):
+    def __init__(self, devices, default=(0, 1)):
         self._devices = list(devices)
+        self.default = type("_Default", (), {"device": default})()
 
-    def query_devices(self):
+    def query_devices(self, device=None, kind=None):
+        del kind
+        if device is not None:
+            return dict(self._devices[int(device)])
         return list(self._devices)
 
 
@@ -70,6 +75,23 @@ class _FakeEngine:
             mode=self.mode,
             running=self.running,
         )
+
+
+class _SlowStartEngine(_FakeEngine):
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def start(self, *, input_device=None, output_device=None, latency="low") -> None:
+        self.started_with = (input_device, output_device, latency)
+        type(self).start_entered.set()
+        type(self).release_start.wait(timeout=2.0)
+        self.running = True
+
+
+class _FailingStopEngine(_FakeEngine):
+    def stop(self) -> None:
+        self.stop_calls += 1
+        raise RuntimeError("stop failed /tmp/audiorescue-private.wav")
 
 
 class _FakeMeeting:
@@ -186,8 +208,8 @@ class LiveUiControllerTest(unittest.TestCase):
         engines = []
         controller = _controller(engine_instances=engines)
 
-        controller.start_audio(DEFAULT_INPUT_CHOICE, DEFAULT_OUTPUT_CHOICE, "enhanced")
-        snapshot = controller.start_audio(DEFAULT_INPUT_CHOICE, DEFAULT_OUTPUT_CHOICE, "raw")
+        controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "enhanced")
+        snapshot = controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "raw")
 
         self.assertEqual(len(engines), 1)
         self.assertEqual(snapshot.audio_mode, "raw")
@@ -219,7 +241,7 @@ class LiveUiControllerTest(unittest.TestCase):
         self.assertEqual(suggestion_snapshot.suggestion, "建议先确认目标。")
         self.assertEqual(meetings[0].request_count, 1)
 
-        controller.start_audio(DEFAULT_INPUT_CHOICE, DEFAULT_OUTPUT_CHOICE, "enhanced")
+        controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "enhanced")
         controller.cleanup()
         self.assertFalse(meetings[0].running)
         self.assertFalse(engines[0].running)
@@ -255,6 +277,135 @@ class LiveUiControllerTest(unittest.TestCase):
         self.assertFalse(payload["audio_running"])
         self.assertEqual(payload["meeting_status"], "stopped")
         self.assertIn("last_action", payload)
+
+    def test_default_speaker_output_is_blocked_before_engine_creation(self) -> None:
+        engines = []
+        controller = _controller(engine_instances=engines)
+
+        snapshot = controller.start_audio(DEFAULT_INPUT_CHOICE, DEFAULT_OUTPUT_CHOICE, "enhanced")
+
+        self.assertFalse(snapshot.audio_running)
+        self.assertEqual(engines, [])
+        self.assertIn("未被识别为耳机或虚拟麦", snapshot.audio_error)
+
+    def test_virtual_input_to_virtual_output_loop_is_blocked(self) -> None:
+        engines = []
+        devices = [
+            {
+                "name": "BlackHole 2ch",
+                "max_input_channels": 2,
+                "max_output_channels": 2,
+                "default_samplerate": 48000,
+            },
+            {
+                "name": "AirPods",
+                "max_input_channels": 0,
+                "max_output_channels": 2,
+                "default_samplerate": 48000,
+            },
+        ]
+        controller = _controller(devices, engine_instances=engines)
+        input_choices, _, _ = controller.list_devices()
+
+        snapshot = controller.start_audio(input_choices[1], VIRTUAL_OUTPUT_CHOICE, "enhanced")
+
+        self.assertFalse(snapshot.audio_running)
+        self.assertEqual(engines, [])
+        self.assertIn("自循环", snapshot.audio_error)
+
+    def test_concurrent_start_does_not_create_second_engine(self) -> None:
+        engines = []
+
+        def engine_factory(*args, **kwargs):
+            engine = _SlowStartEngine(*args, **kwargs)
+            engines.append(engine)
+            return engine
+
+        _SlowStartEngine.start_entered.clear()
+        _SlowStartEngine.release_start.clear()
+        controller = LiveUiController(
+            sounddevice_loader=lambda: _FakeSoundDevice(_devices()),
+            ensure_model=lambda: "gtcrn.onnx",
+            denoiser_factory=lambda *args, **kwargs: _FakeDenoiser(),
+            engine_factory=engine_factory,
+            meeting_factory=lambda *args, **kwargs: _FakeMeeting(*args, **kwargs),
+        )
+        result = []
+        thread = threading.Thread(
+            target=lambda: result.append(
+                controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "enhanced")
+            )
+        )
+
+        thread.start()
+        self.assertTrue(_SlowStartEngine.start_entered.wait(timeout=1.0))
+        second = controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "raw")
+        _SlowStartEngine.release_start.set()
+        thread.join(timeout=2.0)
+
+        self.assertEqual(len(engines), 1)
+        self.assertIn("正在启动", second.last_action)
+        self.assertTrue(result[0].audio_running)
+
+    def test_stop_during_start_stops_engine_after_start_finishes(self) -> None:
+        engines = []
+
+        def engine_factory(*args, **kwargs):
+            engine = _SlowStartEngine(*args, **kwargs)
+            engines.append(engine)
+            return engine
+
+        _SlowStartEngine.start_entered.clear()
+        _SlowStartEngine.release_start.clear()
+        controller = LiveUiController(
+            sounddevice_loader=lambda: _FakeSoundDevice(_devices()),
+            ensure_model=lambda: "gtcrn.onnx",
+            denoiser_factory=lambda *args, **kwargs: _FakeDenoiser(),
+            engine_factory=engine_factory,
+            meeting_factory=lambda *args, **kwargs: _FakeMeeting(*args, **kwargs),
+        )
+        result = []
+        thread = threading.Thread(
+            target=lambda: result.append(
+                controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "enhanced")
+            )
+        )
+
+        thread.start()
+        self.assertTrue(_SlowStartEngine.start_entered.wait(timeout=1.0))
+        stopping = controller.stop_audio()
+        _SlowStartEngine.release_start.set()
+        thread.join(timeout=2.0)
+
+        self.assertIn("已排队停止", stopping.last_action)
+        self.assertEqual(len(engines), 1)
+        self.assertEqual(engines[0].stop_calls, 1)
+        self.assertFalse(controller.snapshot().audio_running)
+        self.assertIn("已停止", result[0].last_action)
+
+    def test_stop_failure_keeps_engine_reference_for_retry(self) -> None:
+        engines = []
+
+        def engine_factory(*args, **kwargs):
+            engine = _FailingStopEngine(*args, **kwargs)
+            engines.append(engine)
+            return engine
+
+        controller = LiveUiController(
+            sounddevice_loader=lambda: _FakeSoundDevice(_devices()),
+            ensure_model=lambda: "gtcrn.onnx",
+            denoiser_factory=lambda *args, **kwargs: _FakeDenoiser(),
+            engine_factory=engine_factory,
+            meeting_factory=lambda *args, **kwargs: _FakeMeeting(*args, **kwargs),
+        )
+        controller.start_audio(DEFAULT_INPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE, "enhanced")
+
+        snapshot = controller.stop_audio()
+
+        self.assertIn("停止异常", snapshot.last_action)
+        self.assertIn("[路径]", snapshot.audio_error)
+        self.assertIs(controller._engine, engines[0])
+        self.assertEqual(engines[0].stop_calls, 1)
 
 
 if __name__ == "__main__":

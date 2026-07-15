@@ -59,10 +59,29 @@ FLOATING_HTML = """<!doctype html>
       margin-right: 7px;
       box-shadow: 0 0 0 6px rgba(123,90,53,.12);
     }
+    .home-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      margin: 0 0 12px;
+      border: 1px solid rgba(139, 99, 60, .24);
+      border-radius: 999px;
+      padding: 5px 12px;
+      background: rgba(255, 246, 230, .68);
+      color: #4e3825;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: 0 8px 18px rgba(96,66,39,.08);
+    }
+    .home-link:hover {
+      background: rgba(255, 235, 202, .84);
+    }
   </style>
 </head>
 <body>
 <main>
+  <a class="home-link" id="return-main" href="/" target="_self">返回主界面</a>
   <div class="card">
     <header><span class="dot"></span><span id="status">连接中</span></header>
     <h1 id="suggestion">暂无建议</h1>
@@ -77,6 +96,18 @@ FLOATING_HTML = """<!doctype html>
   </div>
 </main>
 <script>
+document.getElementById("return-main").addEventListener("click", (event) => {
+  if (window.opener && !window.opener.closed) {
+    event.preventDefault();
+    try {
+      window.opener.focus();
+    } catch (error) {
+      // Focusing the opener may be restricted in embedded browsers.
+    }
+    window.close();
+  }
+});
+
 async function refresh() {
   try {
     const response = await fetch("/audiorescue/live/state", { cache: "no-store" });

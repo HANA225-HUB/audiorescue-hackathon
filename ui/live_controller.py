@@ -82,6 +82,22 @@ def _looks_like_virtual_audio(name: str) -> bool:
     return any(token in normalized for token in ("blackhole", "loopback", "vb-cable"))
 
 
+def _looks_like_headphones(name: str) -> bool:
+    normalized = name.casefold()
+    return any(
+        token in normalized
+        for token in (
+            "headphone",
+            "headset",
+            "airpods",
+            "earbuds",
+            "耳机",
+            "耳麦",
+            "耳塞",
+        )
+    )
+
+
 def _choice_label(index: int, item: dict[str, Any]) -> str:
     return (
         f"{index}: {item['name']} | in={int(item['max_input_channels'])} "
@@ -128,6 +144,10 @@ class LiveUiController:
         self._last_action = "待机"
         self._selected_input = DEFAULT_INPUT_CHOICE
         self._selected_output = DEFAULT_OUTPUT_CHOICE
+        self._audio_state = "idle"
+        self._audio_stop_requested = False
+        self._meeting_state = "idle"
+        self._meeting_stop_requested = False
 
     @staticmethod
     def _load_sounddevice():
@@ -168,6 +188,66 @@ class LiveUiController:
                 return index
         raise RuntimeError("没有找到 BlackHole/Loopback 虚拟麦克风。请先安装 BlackHole 2ch 并重启。")
 
+    @staticmethod
+    def _default_device_index(sd, devices: list[dict[str, Any]], kind: str) -> int:
+        channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+        try:
+            default_pair = getattr(sd, "default").device
+            default_index = int(default_pair[0 if kind == "input" else 1])
+            if 0 <= default_index < len(devices):
+                return default_index
+        except Exception:
+            pass
+        for index, item in enumerate(devices):
+            if int(item.get(channel_key) or 0) > 0:
+                return index
+        raise RuntimeError("没有找到可用音频输入设备。" if kind == "input" else "没有找到可用音频输出设备。")
+
+    def _resolve_device_info(self, sd, device: int | None, kind: str) -> tuple[int, dict[str, Any]]:
+        devices = list(sd.query_devices())
+        index = device
+        if index is None:
+            index = self._default_device_index(sd, devices, kind)
+        if not 0 <= int(index) < len(devices):
+            raise RuntimeError("音频设备编号无效。")
+        info = dict(devices[int(index)])
+        channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+        if int(info.get(channel_key) or 0) <= 0:
+            raise RuntimeError("所选设备不支持音频输入。" if kind == "input" else "所选设备不支持音频输出。")
+        return int(index), info
+
+    def _prepare_audio_devices(
+        self,
+        input_choice: str | None,
+        output_choice: str | None,
+    ) -> tuple[int | None, int | None]:
+        input_device = _parse_device_index(input_choice)
+        output_device = (
+            self._find_virtual_output()
+            if output_choice == VIRTUAL_OUTPUT_CHOICE
+            else _parse_device_index(output_choice)
+        )
+        sd = self._sounddevice_loader()
+        input_index, input_info = self._resolve_device_info(sd, input_device, "input")
+        output_index, output_info = self._resolve_device_info(sd, output_device, "output")
+        input_name = str(input_info.get("name") or "")
+        output_name = str(output_info.get("name") or "")
+        output_is_virtual = _looks_like_virtual_audio(output_name)
+
+        if input_index == output_index:
+            raise RuntimeError("输入和输出不能选择同一个音频设备，避免形成自循环。")
+        if output_is_virtual and _looks_like_virtual_audio(input_name):
+            raise RuntimeError(
+                f"当前输入设备“{input_name}”是虚拟音频设备，会形成自读自写回路。"
+                "请改选真实麦克风。"
+            )
+        if not (_looks_like_headphones(output_name) or output_is_virtual):
+            raise RuntimeError(
+                f"当前输出设备“{output_name}”未被识别为耳机或虚拟麦，"
+                "直接监听可能产生回声或啸叫。请连接耳机或选择 BlackHole 2ch。"
+            )
+        return input_device, output_device
+
     def _create_engine(self, *, meeting_sink_enabled: bool) -> Any:
         model_path = self._ensure_model()
         denoiser = self._denoiser_factory(model_path, num_threads=1)
@@ -205,6 +285,12 @@ class LiveUiController:
         mode: str | None,
     ) -> LiveUiSnapshot:
         with self._lock:
+            if self._audio_state == "starting":
+                self._last_action = "实时音频正在启动，请稍候。"
+                return self.snapshot()
+            if self._audio_state == "stopping":
+                self._last_action = "实时音频正在停止，请稍候。"
+                return self.snapshot()
             if self._engine is not None and getattr(self._engine, "running", False):
                 self._last_action = "实时音频已经在运行，未重复启动。"
                 if mode:
@@ -213,14 +299,12 @@ class LiveUiController:
             self._audio_error = ""
             self._selected_input = input_choice or DEFAULT_INPUT_CHOICE
             self._selected_output = output_choice or DEFAULT_OUTPUT_CHOICE
+            self._audio_state = "starting"
+            self._audio_stop_requested = False
 
+        engine = None
         try:
-            output_device = (
-                self._find_virtual_output()
-                if output_choice == VIRTUAL_OUTPUT_CHOICE
-                else _parse_device_index(output_choice)
-            )
-            input_device = _parse_device_index(input_choice)
+            input_device, output_device = self._prepare_audio_devices(input_choice, output_choice)
             engine = self._create_engine(meeting_sink_enabled=True)
             if mode:
                 engine.set_mode(str(mode))
@@ -228,27 +312,75 @@ class LiveUiController:
         except Exception as exc:
             with self._lock:
                 self._engine = None
+                self._audio_state = "idle"
+                self._audio_stop_requested = False
                 self._audio_error = _safe_error(exc)
                 self._last_action = f"实时音频启动失败：{self._audio_error}"
             return self.snapshot()
 
         with self._lock:
-            self._engine = engine
-            self._last_action = "实时音频已启动。"
+            if self._audio_stop_requested:
+                self._audio_state = "stopping"
+                stop_after_start = True
+            else:
+                stop_after_start = False
+                self._engine = engine
+                self._audio_state = "running"
+                self._last_action = "实时音频已启动。"
+
+        if stop_after_start:
+            try:
+                engine.stop()
+            except Exception as exc:
+                with self._lock:
+                    self._engine = engine
+                    self._audio_state = "running"
+                    self._audio_stop_requested = False
+                    self._audio_error = _safe_error(exc)
+                    self._last_action = f"启动后停止异常：{self._audio_error}"
+                return self.snapshot()
+            with self._lock:
+                if self._engine is engine:
+                    self._engine = None
+                self._audio_state = "idle"
+                self._audio_stop_requested = False
+                self._last_action = "启动期间收到停止请求，实时音频已停止。"
+            return self.snapshot()
+
         return self.snapshot()
 
     def stop_audio(self) -> LiveUiSnapshot:
         with self._lock:
-            engine, self._engine = self._engine, None
+            if self._audio_state == "starting":
+                self._audio_stop_requested = True
+                self._last_action = "实时音频正在启动，已排队停止。"
+                return self.snapshot()
+            if self._audio_state == "stopping":
+                self._last_action = "实时音频正在停止，请稍候。"
+                return self.snapshot()
+            engine = self._engine
+            if engine is None:
+                self._audio_state = "idle"
+                self._audio_error = ""
+                self._last_action = "实时音频已停止。"
+                return self.snapshot()
+            self._audio_state = "stopping"
         if engine is not None:
             try:
                 engine.stop()
             except Exception as exc:
                 with self._lock:
+                    self._engine = engine
+                    self._audio_state = "running"
                     self._audio_error = _safe_error(exc)
                     self._last_action = f"实时音频停止异常：{self._audio_error}"
                 return self.snapshot()
         with self._lock:
+            if self._engine is engine:
+                self._engine = None
+            self._audio_state = "idle"
+            self._audio_stop_requested = False
+            self._audio_error = ""
             self._last_action = "实时音频已停止。"
         return self.snapshot()
 
@@ -276,10 +408,19 @@ class LiveUiController:
 
     def start_meeting(self, preset: str | None) -> LiveUiSnapshot:
         with self._lock:
+            if self._meeting_state == "starting":
+                self._last_action = "会议助手正在启动，请稍候。"
+                return self.snapshot()
+            if self._meeting_state == "stopping":
+                self._last_action = "会议助手正在停止，请稍候。"
+                return self.snapshot()
             if self._meeting is not None and getattr(self._meeting, "running", False):
                 self._last_action = "会议助手已经在运行，未重复启动。"
                 return self.snapshot()
             self._meeting_error = ""
+            self._meeting_state = "starting"
+            self._meeting_stop_requested = False
+        meeting = None
         try:
             meeting = self._meeting_factory(preset=str(preset or "").strip())
             meeting.start()
@@ -287,28 +428,74 @@ class LiveUiController:
             error = _safe_error(exc)
             with self._lock:
                 self._meeting = None
+                self._meeting_state = "idle"
+                self._meeting_stop_requested = False
                 self._meeting_error = error
                 self._last_action = f"会议助手启动失败：{error}"
             return self.snapshot()
         with self._lock:
-            self._meeting = meeting
-            self._meeting_error = ""
-            self._last_action = "会议助手已启动。"
+            if self._meeting_stop_requested:
+                self._meeting_state = "stopping"
+                stop_after_start = True
+            else:
+                stop_after_start = False
+                self._meeting = meeting
+                self._meeting_state = "running"
+                self._meeting_error = ""
+                self._last_action = "会议助手已启动。"
+
+        if stop_after_start:
+            try:
+                meeting.stop()
+            except Exception as exc:
+                error = _safe_error(exc)
+                with self._lock:
+                    self._meeting = meeting
+                    self._meeting_state = "running"
+                    self._meeting_stop_requested = False
+                    self._meeting_error = error
+                    self._last_action = f"会议助手启动后停止异常：{error}"
+                return self.snapshot()
+            with self._lock:
+                self._meeting = None
+                self._meeting_state = "idle"
+                self._meeting_stop_requested = False
+                self._meeting_error = ""
+                self._last_action = "启动期间收到停止请求，会议助手已停止。"
         return self.snapshot()
 
     def stop_meeting(self) -> LiveUiSnapshot:
         with self._lock:
-            meeting, self._meeting = self._meeting, None
+            if self._meeting_state == "starting":
+                self._meeting_stop_requested = True
+                self._last_action = "会议助手正在启动，已排队停止。"
+                return self.snapshot()
+            if self._meeting_state == "stopping":
+                self._last_action = "会议助手正在停止，请稍候。"
+                return self.snapshot()
+            meeting = self._meeting
+            if meeting is None:
+                self._meeting_state = "idle"
+                self._meeting_error = ""
+                self._last_action = "会议助手已停止。"
+                return self.snapshot()
+            self._meeting_state = "stopping"
         if meeting is not None:
             try:
                 meeting.stop()
             except Exception as exc:
                 error = _safe_error(exc)
                 with self._lock:
+                    self._meeting = meeting
+                    self._meeting_state = "running"
                     self._meeting_error = error
                     self._last_action = f"会议助手停止异常：{error}"
                 return self.snapshot()
         with self._lock:
+            if self._meeting is meeting:
+                self._meeting = None
+            self._meeting_state = "idle"
+            self._meeting_stop_requested = False
             self._meeting_error = ""
             self._last_action = "会议助手已停止。"
         return self.snapshot()
@@ -334,9 +521,14 @@ class LiveUiController:
             last_action = self._last_action
             selected_input = self._selected_input
             selected_output = self._selected_output
+            audio_state = self._audio_state
+            meeting_state = self._meeting_state
         audio_running = False
         audio_mode = "enhanced"
-        audio_status = "待机"
+        audio_status = {
+            "starting": "启动中",
+            "stopping": "停止中",
+        }.get(audio_state, "待机")
         stats_values = {
             "input_blocks": 0,
             "enhanced_blocks": 0,
@@ -357,7 +549,8 @@ class LiveUiController:
                 stats = engine.snapshot_stats()
                 audio_running = bool(stats.running)
                 audio_mode = str(stats.mode)
-                audio_status = "运行中" if audio_running else "已停止"
+                if audio_state not in {"starting", "stopping"}:
+                    audio_status = "运行中" if audio_running else "已停止"
                 stats_values.update(
                     {
                         "input_blocks": int(stats.input_blocks),
@@ -377,7 +570,10 @@ class LiveUiController:
             except Exception as exc:
                 audio_error = _safe_error(exc)
                 audio_status = "异常"
-        meeting_status = "stopped"
+        meeting_status = {
+            "starting": "starting",
+            "stopping": "stopping",
+        }.get(meeting_state, "stopped")
         meeting_error = stored_meeting_error
         partial_text = ""
         transcript: tuple[str, ...] = ()
@@ -385,7 +581,8 @@ class LiveUiController:
         asr_dropped_packets = 0
         if meeting is not None:
             snap = meeting.snapshot()
-            meeting_status = str(snap.status)
+            if meeting_state not in {"starting", "stopping"}:
+                meeting_status = str(snap.status)
             meeting_error = _safe_error(snap.error) if snap.error else stored_meeting_error
             partial_text = snap.partial_text
             transcript = tuple(snap.transcript)
