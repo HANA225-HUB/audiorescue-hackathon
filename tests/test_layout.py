@@ -383,9 +383,15 @@ class LayoutSafetyTest(unittest.TestCase):
             "实时会议输入",
             "开始急救",
             "开始新会议（同时启动音频）",
-            "根据会议资料生成回答",
         ):
             self.assertIn(expected, button_texts)
+        for removed in (
+            "立即生成下一句建议",
+            "根据会议资料生成回答",
+            "打开悬浮提示窗",
+            "刷新实时状态",
+        ):
+            self.assertNotIn(removed, button_texts)
         for expected_label in (
             "会议名称",
             "使用场景",
@@ -393,16 +399,40 @@ class LayoutSafetyTest(unittest.TestCase):
             "参会者 / 听众",
             "这次会议的目标",
             "议程 / 汇报顺序（每行一项）",
-            "对方刚刚问了什么？",
         ):
             self.assertIn(expected_label, labels)
+        self.assertNotIn("对方刚刚问了什么？", labels)
         markdown_text = "\n".join(
             str(args[0])
             for kind, args, _ in calls
             if kind == "Markdown" and args
         )
+        self.assertIn("设备与实时引擎", markdown_text)
+        self.assertIn("会前预设与参考资料", markdown_text)
         self.assertIn("资料在本地解析和检索", markdown_text)
         self.assertIn("扫描 PDF 和 PPT 图片暂不 OCR", markdown_text)
+        for removed in (
+            "### 音频引擎",
+            "### 会议助手",
+            "### 悬浮提示窗",
+            "### 会议建议",
+            "#### 最新建议",
+            "#### 实时未定稿字幕",
+            "#### 正式字幕记录",
+        ):
+            self.assertNotIn(removed, markdown_text)
+        elem_classes = [
+            class_name
+            for _, _, kwargs in calls
+            for class_name in kwargs.get("elem_classes", [])
+        ]
+        for removed in (
+            "ar-meeting-status-card",
+            "ar-meeting-assist-panel",
+            "ar-meeting-suggestion",
+            "ar-meeting-float-preview",
+        ):
+            self.assertNotIn(removed, elem_classes)
         visible_columns = [
             kwargs.get("visible")
             for kind, _, kwargs in calls
@@ -411,7 +441,7 @@ class LayoutSafetyTest(unittest.TestCase):
         self.assertEqual(visible_columns, [True, False, False, False])
         js_values = [kwargs.get("js") for _, _, kwargs in events if kwargs.get("js")]
         self.assertIn(SCROLL_TOP_JS, js_values)
-        self.assertIn(OPEN_FLOATING_JS, js_values)
+        self.assertEqual(js_values.count(OPEN_FLOATING_JS), 2)
         self.assertNotIn("window.location.assign", OPEN_FLOATING_JS)
         self.assertIn("ar-floating-open-notice", OPEN_FLOATING_JS)
 
