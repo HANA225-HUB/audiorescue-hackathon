@@ -505,10 +505,220 @@ code {
   overflow-wrap: anywhere;
 }
 
+.ar-meeting-hero {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(172, 116, 64, 0.26) !important;
+  border-left-color: #b97842 !important;
+  background:
+    radial-gradient(circle at 12% 16%, rgba(255, 246, 221, 0.96), transparent 34%),
+    radial-gradient(circle at 84% 8%, rgba(255, 205, 152, 0.42), transparent 30%),
+    linear-gradient(135deg, rgba(255, 248, 235, 0.96), rgba(245, 220, 186, 0.82)) !important;
+  color: #35251b !important;
+}
+
+.ar-meeting-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto 18px 14px auto;
+  width: 170px;
+  height: 54px;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent 0 8%, rgba(153, 93, 52, 0.36) 8% 10%, transparent 10% 18%),
+    linear-gradient(90deg, transparent 0 20%, rgba(65, 118, 113, 0.32) 20% 22%, transparent 22% 30%);
+  background-size: 22px 100%, 30px 100%;
+  opacity: 0.55;
+  filter: blur(0.2px);
+}
+
+.ar-meeting-hero h2,
+.ar-meeting-hero p {
+  color: #35251b !important;
+}
+
+.ar-meeting-page {
+  margin: 12px 0 20px !important;
+  padding: 16px !important;
+  border: 1px solid rgba(151, 99, 54, 0.24) !important;
+  border-radius: 8px !important;
+  background:
+    radial-gradient(circle at 14% 8%, rgba(255, 244, 220, 0.72), transparent 28%),
+    radial-gradient(circle at 94% 18%, rgba(234, 181, 119, 0.42), transparent 26%),
+    linear-gradient(140deg, rgba(255, 251, 242, 0.92), rgba(244, 224, 194, 0.86)) !important;
+  box-shadow: 0 18px 42px rgba(97, 65, 38, 0.12);
+}
+
+.ar-meeting-status-row,
+.ar-meeting-grid,
+.ar-meeting-button-row {
+  gap: 12px !important;
+}
+
+.ar-meeting-grid {
+  margin-top: 12px !important;
+}
+
+.ar-meeting-status-card,
+.ar-meeting-panel,
+.ar-meeting-meter,
+.ar-meeting-live-text,
+.ar-meeting-log,
+.ar-meeting-suggestion,
+.ar-meeting-action-note,
+.ar-floating-card {
+  border: 1px solid rgba(138, 91, 49, 0.24) !important;
+  border-radius: 8px !important;
+  background: rgba(255, 246, 230, 0.76) !important;
+  color: #31251c !important;
+  box-shadow: 0 10px 24px rgba(94, 61, 35, 0.09);
+}
+
+.ar-meeting-status-card,
+.ar-meeting-panel {
+  min-height: 100%;
+  padding: 14px !important;
+}
+
+.ar-meeting-panel {
+  backdrop-filter: blur(10px);
+}
+
+.gradio-container .ar-meeting-page h1,
+.gradio-container .ar-meeting-page h2,
+.gradio-container .ar-meeting-page h3,
+.gradio-container .ar-meeting-page h4,
+.gradio-container .ar-meeting-page p,
+.gradio-container .ar-meeting-page label,
+.gradio-container .ar-meeting-page span,
+.gradio-container .ar-meeting-page li,
+.gradio-container .ar-meeting-page code,
+.gradio-container .ar-meeting-page .prose,
+.gradio-container .ar-meeting-page .markdown {
+  color: #31251c !important;
+}
+
+.ar-meeting-panel-title {
+  margin-bottom: 8px !important;
+}
+
+.ar-meeting-input .wrap,
+.ar-meeting-input .form,
+.ar-meeting-preset textarea,
+.ar-meeting-mode .wrap,
+.ar-meeting-mode .form {
+  border-color: rgba(138, 91, 49, 0.24) !important;
+  background: rgba(255, 252, 246, 0.72) !important;
+}
+
+.ar-meeting-meter,
+.ar-meeting-live-text,
+.ar-meeting-log,
+.ar-meeting-suggestion,
+.ar-meeting-action-note {
+  margin-top: 10px !important;
+  padding: 12px !important;
+  overflow-wrap: anywhere;
+}
+
+.ar-meeting-live-text,
+.ar-meeting-log,
+.ar-meeting-suggestion {
+  min-height: 118px;
+}
+
+.ar-meeting-suggestion {
+  background: linear-gradient(145deg, rgba(255, 238, 204, 0.82), rgba(249, 224, 190, 0.7)) !important;
+}
+
+.ar-meeting-page button.primary,
+.ar-meeting-page .ar-meeting-action button.primary {
+  background: linear-gradient(135deg, #b97842, #9b663b) !important;
+  color: #fffaf2 !important;
+  box-shadow: 0 10px 20px rgba(151, 93, 50, 0.22) !important;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease !important;
+}
+
+.ar-meeting-page button.secondary,
+.ar-meeting-page .ar-meeting-action-muted button {
+  border: 1px solid rgba(151, 93, 50, 0.28) !important;
+  background: rgba(255, 245, 226, 0.64) !important;
+  color: #5c3d27 !important;
+  box-shadow: 0 8px 18px rgba(105, 70, 39, 0.08) !important;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease !important;
+}
+
+.ar-meeting-page button.primary:hover,
+.ar-meeting-page .ar-meeting-action button.primary:hover {
+  background: linear-gradient(135deg, #c8854d, #a96f40) !important;
+  box-shadow: 0 14px 28px rgba(151, 93, 50, 0.28) !important;
+  transform: translateY(-1px) scale(1.015);
+}
+
+.ar-meeting-page button.secondary:hover,
+.ar-meeting-page .ar-meeting-action-muted button:hover {
+  background: rgba(255, 235, 202, 0.82) !important;
+  box-shadow: 0 12px 24px rgba(105, 70, 39, 0.13) !important;
+  transform: translateY(-1px) scale(1.01);
+}
+
+.ar-meeting-page button:active {
+  transform: translateY(0) scale(0.985) !important;
+}
+
+.ar-meeting-float-preview {
+  margin-top: 12px !important;
+}
+
+.ar-floating-card {
+  padding: 12px !important;
+}
+
+.ar-floating-card header {
+  color: #6d4b31;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.ar-floating-card h2 {
+  color: #31251c;
+  font-size: 18px;
+  line-height: 1.45;
+  margin: 0 0 10px;
+}
+
+.ar-floating-card p {
+  color: #4d3a2c;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+
+.ar-floating-card strong {
+  display: block;
+  color: #7b5636;
+  margin-bottom: 2px;
+}
+
 img,
 audio,
 video {
   max-width: 100%;
+}
+
+@media (max-width: 760px) {
+  .ar-meeting-page {
+    padding: 10px !important;
+  }
+
+  .ar-meeting-status-card,
+  .ar-meeting-panel {
+    padding: 12px !important;
+  }
+
+  .ar-meeting-hero::after {
+    width: 112px;
+    opacity: 0.35;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -623,6 +833,51 @@ video {
   .ar-visual label,
   .ar-download label {
     color: var(--ar-ink) !important;
+  }
+
+  .ar-meeting-hero,
+  .ar-meeting-page,
+  .ar-meeting-status-card,
+  .ar-meeting-panel,
+  .ar-meeting-meter,
+  .ar-meeting-live-text,
+  .ar-meeting-log,
+  .ar-meeting-suggestion,
+  .ar-meeting-action-note,
+  .ar-floating-card {
+    border-color: rgba(138, 91, 49, 0.24) !important;
+    color: #31251c !important;
+  }
+
+  .ar-meeting-hero {
+    background:
+      radial-gradient(circle at 12% 16%, rgba(255, 246, 221, 0.96), transparent 34%),
+      radial-gradient(circle at 84% 8%, rgba(255, 205, 152, 0.42), transparent 30%),
+      linear-gradient(135deg, rgba(255, 248, 235, 0.96), rgba(245, 220, 186, 0.82)) !important;
+    border-left-color: #b97842 !important;
+  }
+
+  .ar-meeting-page {
+    background:
+      radial-gradient(circle at 14% 8%, rgba(255, 244, 220, 0.72), transparent 28%),
+      radial-gradient(circle at 94% 18%, rgba(234, 181, 119, 0.42), transparent 26%),
+      linear-gradient(140deg, rgba(255, 251, 242, 0.92), rgba(244, 224, 194, 0.86)) !important;
+  }
+
+  .gradio-container .ar-meeting-page h1,
+  .gradio-container .ar-meeting-page h2,
+  .gradio-container .ar-meeting-page h3,
+  .gradio-container .ar-meeting-page h4,
+  .gradio-container .ar-meeting-page p,
+  .gradio-container .ar-meeting-page label,
+  .gradio-container .ar-meeting-page span,
+  .gradio-container .ar-meeting-page li,
+  .gradio-container .ar-meeting-page code,
+  .gradio-container .ar-meeting-page .prose,
+  .gradio-container .ar-meeting-page .markdown,
+  .ar-meeting-hero h2,
+  .ar-meeting-hero p {
+    color: #31251c !important;
   }
 }
 

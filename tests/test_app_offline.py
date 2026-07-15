@@ -1,4 +1,5 @@
 import tempfile
+import os
 import sys
 import types
 import unittest
@@ -7,7 +8,7 @@ from asyncio import run
 from pathlib import Path
 from unittest import mock
 
-from app import OfflineHtmlResourceMiddleware, offline_launch_app_kwargs
+from app import LiveStateMiddleware, OfflineHtmlResourceMiddleware, offline_launch_app_kwargs
 from ui.file_delivery import FileDeliveryMiddleware, clear_delivery_registry, register_file_for_delivery
 from ui.file_staging import stage_files_for_gradio
 from ui.layout import strip_remote_html_resources
@@ -82,9 +83,68 @@ class OfflineMiddlewareTest(unittest.TestCase):
             {"starlette": fake_starlette, "starlette.middleware": fake_middleware},
         ):
             middleware = offline_launch_app_kwargs()["middleware"]
-        self.assertEqual(len(middleware), 2)
-        self.assertIs(middleware[0].cls, FileDeliveryMiddleware)
-        self.assertIs(middleware[1].cls, OfflineHtmlResourceMiddleware)
+        self.assertEqual(len(middleware), 3)
+        self.assertIs(middleware[0].cls, LiveStateMiddleware)
+        self.assertIs(middleware[1].cls, FileDeliveryMiddleware)
+        self.assertIs(middleware[2].cls, OfflineHtmlResourceMiddleware)
+
+    def test_live_state_route_returns_same_process_snapshot_without_secret(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"missing"})
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        with mock.patch.dict(
+            os.environ,
+            {"DASHSCOPE_API_KEY": "SECRET_MARKER_SHOULD_NOT_RENDER"},
+        ):
+            run(
+                LiveStateMiddleware(passthrough_app)(
+                    {
+                        "type": "http",
+                        "method": "GET",
+                        "path": "/audiorescue/live/state",
+                    },
+                    _receive,
+                    send,
+                )
+            )
+
+        body = sent[-1]["body"].decode("utf-8")
+        self.assertEqual(sent[0]["status"], 200)
+        self.assertIn('"audio_running"', body)
+        self.assertNotIn("SECRET_MARKER_SHOULD_NOT_RENDER", body)
+
+    def test_live_floating_route_serves_local_helper_page(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"missing"})
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        run(
+            LiveStateMiddleware(passthrough_app)(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/audiorescue/live/floating",
+                },
+                _receive,
+                send,
+            )
+        )
+
+        body = sent[-1]["body"].decode("utf-8")
+        self.assertEqual(sent[0]["status"], 200)
+        self.assertIn("/audiorescue/live/state", body)
+        self.assertIn("AudioRescue 悬浮提示窗", body)
 
     def test_non_html_payloads_are_byte_preserved(self) -> None:
         cases = [

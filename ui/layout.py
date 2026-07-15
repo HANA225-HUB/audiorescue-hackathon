@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import os
 import re
+import html
 from pathlib import Path
 from typing import Any
 
+from .live_controller import (
+    DEFAULT_INPUT_CHOICE,
+    DEFAULT_OUTPUT_CHOICE,
+    LIVE_CONTROLLER,
+    VIRTUAL_OUTPUT_CHOICE,
+    render_floating_html,
+)
 from .presenters import (
     failed_result,
     list_fixture_names,
@@ -17,6 +25,16 @@ from .presenters import (
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CSS_PATH = ROOT_DIR / "ui" / "styles.css"
+
+OPEN_FLOATING_JS = """
+() => {
+  window.open(
+    "/audiorescue/live/floating",
+    "audiorescue_meeting_floating",
+    "popup=yes,width=420,height=560,menubar=no,toolbar=no,location=no,status=no"
+  );
+}
+"""
 
 REMOTE_HTML_PATTERNS = (
     re.compile(
@@ -43,6 +61,66 @@ def strip_remote_html_resources(html_text: str) -> str:
     for pattern in REMOTE_HTML_PATTERNS:
         cleaned = pattern.sub("", cleaned)
     return cleaned
+
+
+def _escape_md(value: object) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def _format_transcript(lines: tuple[str, ...]) -> str:
+    if not lines:
+        return "暂无确认字幕。"
+    return "\n".join(f"{index + 1}. {_escape_md(line)}" for index, line in enumerate(lines[-8:]))
+
+
+def _live_ui_values(snapshot=None) -> tuple[str, str, str, str, str, str, str, str, str]:
+    snap = snapshot or LIVE_CONTROLLER.snapshot()
+    audio_error = f"错误：{_escape_md(snap.audio_error)}" if snap.audio_error else "错误：无"
+    meeting_error = f"错误：{_escape_md(snap.meeting_error)}" if snap.meeting_error else "错误：无"
+    audio_status = (
+        "### 音频引擎\n"
+        f"**{_escape_md(snap.audio_status)}**\n\n"
+        f"模式：`{_escape_md(snap.audio_mode)}` · RTF：`{snap.realtime_factor:.3f}` · {audio_error}"
+    )
+    meeting_status = (
+        "### 会议助手\n"
+        f"**{_escape_md(snap.meeting_status)}**\n\n"
+        f"实时字幕：`{1 if snap.partial_text else 0}` · "
+        f"正式记录：`{len(snap.transcript)}` · ASR丢包：`{snap.asr_dropped_packets}` · {meeting_error}"
+    )
+    floating_status = (
+        "### 悬浮提示窗\n"
+        "**同源状态**\n\n"
+        "主页面与悬浮窗共用同一个后端控制器和快照接口。"
+    )
+    meter = (
+        f"输入块：`{snap.input_blocks}` · 增强块：`{snap.enhanced_blocks}` · "
+        f"输出块：`{snap.output_blocks}` · 丢帧：`{snap.input_drops + snap.output_drops}` · "
+        f"欠载：`{snap.output_underruns}` · 重同步：`{snap.resyncs}` · "
+        f"P95：`{snap.inference_p95_ms:.2f} ms` · 最大：`{snap.inference_max_ms:.2f} ms`"
+    )
+    live_text = (
+        "#### 实时未定稿字幕\n"
+        f"{_escape_md(snap.partial_text) if snap.partial_text else '等待增强后的 16 kHz 音频进入转写流。'}"
+    )
+    transcript = "#### 正式字幕记录\n" + _format_transcript(snap.transcript)
+    suggestion = (
+        "#### 最新建议\n"
+        f"{_escape_md(snap.suggestion) if snap.suggestion else '启动会议助手后，这里显示最新大模型建议。'}"
+    )
+    floating = render_floating_html(snap)
+    action = f"状态：{_escape_md(snap.last_action)}"
+    return (
+        audio_status,
+        meeting_status,
+        floating_status,
+        meter,
+        live_text,
+        transcript,
+        suggestion,
+        floating,
+        action,
+    )
 
 
 class OfflineHtmlResourceMiddleware:
@@ -342,6 +420,182 @@ def build_demo():
             scroll_to_output=True,
             show_progress="full",
         )
+
+        gr.Markdown(
+            "## 实时会议输入\n"
+            "真实麦克风 → 实时增强 → 监听或 BlackHole 虚拟麦 → 字幕与会议建议。",
+            elem_classes=["ar-hero", "ar-meeting-hero"],
+        )
+
+        with gr.Column(elem_classes=["ar-meeting-page"]):
+            with gr.Row(equal_height=True, elem_classes=["ar-meeting-status-row"]):
+                audio_live_status = gr.Markdown(
+                    _live_ui_values()[0],
+                    elem_classes=["ar-meeting-status-card"],
+                )
+                meeting_live_status = gr.Markdown(
+                    _live_ui_values()[1],
+                    elem_classes=["ar-meeting-status-card"],
+                )
+                floating_live_status = gr.Markdown(
+                    _live_ui_values()[2],
+                    elem_classes=["ar-meeting-status-card"],
+                )
+
+            with gr.Row(equal_height=True, elem_classes=["ar-meeting-grid"]):
+                with gr.Column(scale=4, elem_classes=["ar-meeting-panel", "ar-meeting-control-panel"]):
+                    gr.Markdown("### 设备与实时引擎", elem_classes=["ar-meeting-panel-title"])
+                    input_device = gr.Dropdown(
+                        choices=[DEFAULT_INPUT_CHOICE],
+                        value=DEFAULT_INPUT_CHOICE,
+                        label="音频输入",
+                        interactive=True,
+                        elem_classes=["ar-meeting-input"],
+                    )
+                    output_device = gr.Dropdown(
+                        choices=[DEFAULT_OUTPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE],
+                        value=DEFAULT_OUTPUT_CHOICE,
+                        label="监听 / 虚拟麦输出",
+                        interactive=True,
+                        elem_classes=["ar-meeting-input"],
+                    )
+                    live_mode = gr.Radio(
+                        ["enhanced", "quiet", "raw"],
+                        value="enhanced",
+                        label="实时模式",
+                        interactive=True,
+                        elem_classes=["ar-meeting-mode"],
+                    )
+                    refresh_devices = gr.Button("刷新设备", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                    with gr.Row(elem_classes=["ar-meeting-button-row"]):
+                        start_live_audio = gr.Button("启动实时音频", variant="primary", elem_classes=["ar-meeting-action"])
+                        stop_live_audio = gr.Button("停止音频", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                    apply_live_mode = gr.Button("应用实时模式", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                    live_meter = gr.Markdown(
+                        _live_ui_values()[3],
+                        elem_classes=["ar-meeting-meter"],
+                    )
+
+                with gr.Column(scale=5, elem_classes=["ar-meeting-panel", "ar-meeting-transcript-panel"]):
+                    gr.Markdown("### 字幕与会议预设", elem_classes=["ar-meeting-panel-title"])
+                    meeting_preset = gr.Textbox(
+                        label="会前会议预设",
+                        placeholder="填写会议主题、角色、目标和需要重点关注的表达方式。",
+                        lines=4,
+                        elem_classes=["ar-meeting-input", "ar-meeting-preset"],
+                    )
+                    with gr.Row(elem_classes=["ar-meeting-button-row"]):
+                        start_meeting = gr.Button("启动实时转写", variant="primary", elem_classes=["ar-meeting-action"])
+                        stop_meeting = gr.Button("停止会议助手", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                    live_partial = gr.Markdown(
+                        _live_ui_values()[4],
+                        elem_classes=["ar-meeting-live-text"],
+                    )
+                    live_transcript = gr.Markdown(
+                        _live_ui_values()[5],
+                        elem_classes=["ar-meeting-log"],
+                    )
+
+                with gr.Column(scale=4, elem_classes=["ar-meeting-panel", "ar-meeting-assist-panel"]):
+                    gr.Markdown("### 会议建议", elem_classes=["ar-meeting-panel-title"])
+                    live_suggestion = gr.Markdown(
+                        _live_ui_values()[6],
+                        elem_classes=["ar-meeting-suggestion"],
+                    )
+                    request_next_line = gr.Button("立即生成下一句建议", variant="primary", elem_classes=["ar-meeting-action"])
+                    open_floating = gr.Button("打开悬浮提示窗", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                    floating_preview = gr.HTML(
+                        _live_ui_values()[7],
+                        elem_classes=["ar-meeting-float-preview"],
+                    )
+                    refresh_live_status = gr.Button("刷新实时状态", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+
+            live_action_note = gr.Markdown(
+                _live_ui_values()[8],
+                elem_classes=["ar-meeting-action-note"],
+            )
+
+        live_outputs = [
+            audio_live_status,
+            meeting_live_status,
+            floating_live_status,
+            live_meter,
+            live_partial,
+            live_transcript,
+            live_suggestion,
+            floating_preview,
+            live_action_note,
+        ]
+
+        def refresh_live_devices():
+            try:
+                input_choices, output_choices, _ = LIVE_CONTROLLER.list_devices()
+                input_value = input_choices[0] if input_choices else DEFAULT_INPUT_CHOICE
+                output_value = output_choices[0] if output_choices else DEFAULT_OUTPUT_CHOICE
+                return (
+                    gr.update(choices=input_choices, value=input_value),
+                    gr.update(choices=output_choices, value=output_value),
+                    *_live_ui_values(),
+                )
+            except Exception as exc:
+                LIVE_CONTROLLER.record_ui_error("设备刷新失败", exc)
+                return (
+                    gr.update(choices=[DEFAULT_INPUT_CHOICE], value=DEFAULT_INPUT_CHOICE),
+                    gr.update(choices=[DEFAULT_OUTPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE], value=DEFAULT_OUTPUT_CHOICE),
+                    *_live_ui_values(),
+                )
+
+        def start_audio_from_ui(selected_input, selected_output, selected_mode):
+            return _live_ui_values(
+                LIVE_CONTROLLER.start_audio(selected_input, selected_output, selected_mode)
+            )
+
+        def stop_audio_from_ui():
+            return _live_ui_values(LIVE_CONTROLLER.stop_audio())
+
+        def apply_mode_from_ui(selected_mode):
+            return _live_ui_values(LIVE_CONTROLLER.set_mode(selected_mode))
+
+        def start_meeting_from_ui(preset):
+            return _live_ui_values(LIVE_CONTROLLER.start_meeting(preset))
+
+        def stop_meeting_from_ui():
+            return _live_ui_values(LIVE_CONTROLLER.stop_meeting())
+
+        def request_next_line_from_ui():
+            return _live_ui_values(LIVE_CONTROLLER.request_next_line())
+
+        def refresh_live_from_ui():
+            return _live_ui_values()
+
+        def open_floating_noop():
+            return None
+
+        refresh_devices.click(
+            refresh_live_devices,
+            outputs=[input_device, output_device, *live_outputs],
+        )
+        start_live_audio.click(
+            start_audio_from_ui,
+            inputs=[input_device, output_device, live_mode],
+            outputs=live_outputs,
+            show_progress="full",
+        )
+        stop_live_audio.click(stop_audio_from_ui, outputs=live_outputs)
+        apply_live_mode.click(apply_mode_from_ui, inputs=[live_mode], outputs=live_outputs)
+        start_meeting.click(
+            start_meeting_from_ui,
+            inputs=[meeting_preset],
+            outputs=live_outputs,
+            show_progress="full",
+        )
+        stop_meeting.click(stop_meeting_from_ui, outputs=live_outputs)
+        request_next_line.click(request_next_line_from_ui, outputs=live_outputs)
+        refresh_live_status.click(refresh_live_from_ui, outputs=live_outputs)
+        open_floating.click(open_floating_noop, js=OPEN_FLOATING_JS)
+
+        if hasattr(demo, "unload"):
+            demo.unload(lambda: LIVE_CONTROLLER.cleanup())
 
         if default_fixture and fixture_enabled:
             demo.load(_run_fixture, inputs=[fixture], outputs=outputs)
