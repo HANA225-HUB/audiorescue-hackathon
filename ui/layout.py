@@ -33,6 +33,20 @@ BACKGROUND_ASSETS = {
     "--ar-bg-audio": "audio-bg.webp",
     "--ar-bg-meeting": "meeting-bg.webp",
 }
+MEETING_SCENARIO_CHOICES = [
+    ("普通会议", "general"),
+    ("答辩 / 评审", "defense"),
+    ("组会 / 研讨", "group_meeting"),
+    ("项目 / 比赛汇报", "project_report"),
+    ("自定义", "custom"),
+]
+MEETING_SCENARIO_LABELS = dict((value, label) for label, value in MEETING_SCENARIO_CHOICES)
+SUGGESTION_KIND_LABELS = {
+    "answer": "问题回答",
+    "next_section": "下一段提示",
+    "clarify": "澄清建议",
+    "correction": "修正提示",
+}
 APP_JS = """
 () => {
   if (window.__audiorescueFlowReady) {
@@ -336,7 +350,28 @@ def strip_remote_html_resources(html_text: str) -> str:
 
 
 def _escape_md(value: object) -> str:
-    return html.escape(str(value), quote=False)
+    escaped = html.escape(str(value), quote=False)
+    for marker in (
+        "\\",
+        "`",
+        "*",
+        "_",
+        "{",
+        "}",
+        "[",
+        "]",
+        "(",
+        ")",
+        "#",
+        "+",
+        "-",
+        ".",
+        "!",
+        "|",
+        ">",
+    ):
+        escaped = escaped.replace(marker, f"\\{marker}")
+    return escaped
 
 
 def _format_transcript(lines: tuple[str, ...]) -> str:
@@ -358,7 +393,9 @@ def _live_ui_values(snapshot=None) -> tuple[str, str, str, str, str, str, str, s
         "### 会议助手\n"
         f"**{_escape_md(snap.meeting_status)}**\n\n"
         f"实时字幕：`{1 if snap.partial_text else 0}` · "
-        f"正式记录：`{len(snap.transcript)}` · ASR丢包：`{snap.asr_dropped_packets}` · {meeting_error}"
+        f"正式记录：`{len(snap.transcript)}` · ASR丢包：`{snap.asr_dropped_packets}` · {meeting_error}\n\n"
+        f"场景：`{_escape_md(MEETING_SCENARIO_LABELS.get(snap.meeting_scenario, snap.meeting_scenario))}` · "
+        f"会议资料：`{len(snap.meeting_material_names)}`"
     )
     floating_status = (
         "### 悬浮提示窗\n"
@@ -376,9 +413,27 @@ def _live_ui_values(snapshot=None) -> tuple[str, str, str, str, str, str, str, s
         f"{_escape_md(snap.partial_text) if snap.partial_text else '等待增强后的 16 kHz 音频进入转写流。'}"
     )
     transcript = "#### 正式字幕记录\n" + _format_transcript(snap.transcript)
+    suggestion_meta: list[str] = []
+    if snap.suggestion_kind:
+        suggestion_meta.append(
+            SUGGESTION_KIND_LABELS.get(snap.suggestion_kind, snap.suggestion_kind)
+        )
+    if snap.confidence > 0:
+        suggestion_meta.append(f"置信度 {snap.confidence:.0%}")
+    if snap.needs_verification:
+        suggestion_meta.append("⚠ 需要核实")
+    source_text = " / ".join(_escape_md(item) for item in snap.suggestion_sources)
+    material_text = " / ".join(
+        _escape_md(item) for item in snap.meeting_material_names
+    )
+    warning_text = " / ".join(_escape_md(item) for item in snap.material_warnings)
     suggestion = (
         "#### 最新建议\n"
-        f"{_escape_md(snap.suggestion) if snap.suggestion else '启动会议助手后，这里显示最新大模型建议。'}"
+        f"{_escape_md(snap.suggestion) if snap.suggestion else '启动会议助手后，这里显示最新大模型建议。'}\n\n"
+        f"{'·'.join(suggestion_meta) if suggestion_meta else '建议状态：待生成'}\n\n"
+        f"依据：{source_text or '未引用会议资料'}\n\n"
+        f"已加载：{material_text or '无'}"
+        + (f"\n\n资料提示：{warning_text}" if warning_text else "")
     )
     floating = render_floating_html(snap)
     action = f"状态：{_escape_md(snap.last_action)}"
@@ -778,7 +833,7 @@ def build_demo():
                     with gr.Column(elem_classes=["ar-feature-card", "ar-feature-card-meeting"]):
                         gr.Markdown(
                             "### 实时会议输入\n"
-                            "实时接入入口已预留，后续可扩展会议音频输入、实时转写和会议摘要。",
+                            "实时降噪与小声增强、语音转写、会前资料检索和大模型提词已接入。",
                             elem_classes=["ar-feature-copy"],
                         )
                         meeting_feature_button = gr.Button(
@@ -847,7 +902,7 @@ def build_demo():
                         )
                         output_device = gr.Dropdown(
                             choices=[DEFAULT_OUTPUT_CHOICE, VIRTUAL_OUTPUT_CHOICE],
-                            value=DEFAULT_OUTPUT_CHOICE,
+                            value=VIRTUAL_OUTPUT_CHOICE,
                             label="监听 / 虚拟麦输出",
                             interactive=True,
                             elem_classes=["ar-meeting-input"],
@@ -885,17 +940,93 @@ def build_demo():
                             elem_classes=["ar-meeting-meter"],
                         )
 
-                    with gr.Column(scale=5, elem_classes=["ar-meeting-panel", "ar-meeting-transcript-panel"]):
-                        gr.Markdown("### 字幕与会议预设", elem_classes=["ar-meeting-panel-title"])
-                        meeting_preset = gr.Textbox(
-                            label="会前会议预设",
-                            placeholder="填写会议主题、角色、目标和需要重点关注的表达方式。",
+                    with gr.Column(scale=6, elem_classes=["ar-meeting-panel", "ar-meeting-transcript-panel"]):
+                        gr.Markdown("### 会前预设与参考资料", elem_classes=["ar-meeting-panel-title"])
+                        meeting_title = gr.Textbox(
+                            label="会议名称",
+                            placeholder="例如：AudioRescue 项目答辩",
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        meeting_scenario = gr.Dropdown(
+                            choices=MEETING_SCENARIO_CHOICES,
+                            value="general",
+                            label="使用场景",
+                            interactive=True,
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        with gr.Row(elem_classes=["ar-meeting-preset-row"]):
+                            meeting_role = gr.Textbox(
+                                label="我的身份",
+                                placeholder="例如：学生答辩人",
+                                elem_classes=["ar-meeting-input"],
+                            )
+                            meeting_audience = gr.Textbox(
+                                label="参会者 / 听众",
+                                placeholder="例如：导师和评委",
+                                elem_classes=["ar-meeting-input"],
+                            )
+                        meeting_objective = gr.Textbox(
+                            label="这次会议的目标",
+                            placeholder="说清希望模型帮你完成什么。",
+                            lines=2,
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        meeting_agenda = gr.Textbox(
+                            label="议程 / 汇报顺序（每行一项）",
+                            placeholder="背景\n方案\n实验结果\n总结",
                             lines=4,
-                            elem_classes=["ar-meeting-input", "ar-meeting-preset"],
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        with gr.Accordion("更详细的提示设置", open=False):
+                            meeting_focus = gr.Textbox(
+                                label="需要重点关注的内容（每行一项）",
+                                placeholder="例如：实验数字必须以资料为准",
+                                lines=2,
+                                elem_classes=["ar-meeting-input"],
+                            )
+                            meeting_constraints = gr.Textbox(
+                                label="禁止项 / 边界（每行一项）",
+                                placeholder="例如：不夸大效果，不编造数字",
+                                lines=2,
+                                elem_classes=["ar-meeting-input"],
+                            )
+                            meeting_preset = gr.Textbox(
+                                label="其他个性化需求",
+                                placeholder="例如：回答简洁，完成一段后再提示下一段。",
+                                lines=3,
+                                elem_classes=["ar-meeting-input", "ar-meeting-preset"],
+                            )
+                            meeting_tone = gr.Radio(
+                                [("自然", "natural"), ("正式", "formal"), ("简洁专业", "concise")],
+                                value="natural",
+                                label="表达风格",
+                                interactive=True,
+                                elem_classes=["ar-meeting-mode"],
+                            )
+                            meeting_coach_level = gr.Radio(
+                                [("保守提示", "conservative"), ("积极提示", "active"), ("只手动请求", "manual")],
+                                value="conservative",
+                                label="提示频率",
+                                interactive=True,
+                                elem_classes=["ar-meeting-mode"],
+                            )
+                        meeting_materials = gr.File(
+                            label="会议参考资料（最多 10 份）",
+                            file_count="multiple",
+                            type="filepath",
+                            file_types=[".pdf", ".pptx", ".docx", ".txt", ".md"],
+                            elem_classes=["ar-meeting-input", "ar-meeting-materials"],
+                        )
+                        gr.Markdown(
+                            "增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；"
+                            "生成建议时会把会议设置、最近转写和命中的资料文字片段发给千问。"
+                            "资料在本地解析和检索，不上传原始 PDF/PPT/DOCX 文件；"
+                            "短文档可能大部分进入命中片段；扫描 PDF 和 PPT 图片暂不 OCR。",
+                            elem_classes=["ar-meeting-privacy-note"],
                         )
                         with gr.Row(elem_classes=["ar-meeting-button-row"]):
                             start_meeting = gr.Button(
-                                "启动实时转写",
+                                "开始新会议（同时启动音频）",
                                 variant="primary",
                                 elem_classes=["ar-meeting-action"],
                             )
@@ -921,6 +1052,17 @@ def build_demo():
                         )
                         request_next_line = gr.Button(
                             "立即生成下一句建议",
+                            variant="primary",
+                            elem_classes=["ar-meeting-action"],
+                        )
+                        manual_question = gr.Textbox(
+                            label="对方刚刚问了什么？",
+                            placeholder="当耳机中的导师声音无法被本机 ASR 听到时，在这里输入问题。",
+                            lines=3,
+                            elem_classes=["ar-meeting-input", "ar-meeting-question"],
+                        )
+                        request_answer = gr.Button(
+                            "根据会议资料生成回答",
                             variant="primary",
                             elem_classes=["ar-meeting-action"],
                         )
@@ -992,14 +1134,51 @@ def build_demo():
         def apply_mode_from_ui(selected_mode):
             return _live_ui_values(LIVE_CONTROLLER.set_mode(selected_mode))
 
-        def start_meeting_from_ui(preset):
-            return _live_ui_values(LIVE_CONTROLLER.start_meeting(preset))
+        def start_meeting_from_ui(
+            selected_input,
+            selected_output,
+            selected_mode,
+            title,
+            scenario,
+            role,
+            audience,
+            objective,
+            agenda,
+            focus,
+            constraints,
+            preset,
+            tone,
+            coach_level,
+            materials,
+        ):
+            return _live_ui_values(
+                LIVE_CONTROLLER.start_meeting_with_audio(
+                    selected_input,
+                    selected_output,
+                    selected_mode,
+                    preset,
+                    title=title,
+                    scenario=scenario,
+                    user_role=role,
+                    audience=audience,
+                    objective=objective,
+                    agenda=agenda,
+                    focus_points=focus,
+                    constraints=constraints,
+                    tone=tone,
+                    coach_level=coach_level,
+                    material_files=materials,
+                )
+            )
 
         def stop_meeting_from_ui():
             return _live_ui_values(LIVE_CONTROLLER.stop_meeting())
 
         def request_next_line_from_ui():
             return _live_ui_values(LIVE_CONTROLLER.request_next_line())
+
+        def request_answer_from_ui(question):
+            return _live_ui_values(LIVE_CONTROLLER.request_answer(question))
 
         def refresh_live_from_ui():
             return _live_ui_values()
@@ -1028,12 +1207,34 @@ def build_demo():
         apply_live_mode.click(apply_mode_from_ui, inputs=[live_mode], outputs=live_outputs)
         start_meeting.click(
             start_meeting_from_ui,
-            inputs=[meeting_preset],
+            inputs=[
+                input_device,
+                output_device,
+                live_mode,
+                meeting_title,
+                meeting_scenario,
+                meeting_role,
+                meeting_audience,
+                meeting_objective,
+                meeting_agenda,
+                meeting_focus,
+                meeting_constraints,
+                meeting_preset,
+                meeting_tone,
+                meeting_coach_level,
+                meeting_materials,
+            ],
             outputs=live_outputs,
             show_progress="full",
         )
         stop_meeting.click(stop_meeting_from_ui, outputs=live_outputs)
         request_next_line.click(request_next_line_from_ui, outputs=live_outputs)
+        request_answer.click(
+            request_answer_from_ui,
+            inputs=[manual_question],
+            outputs=live_outputs,
+            show_progress="full",
+        )
         refresh_live_status.click(refresh_live_from_ui, outputs=live_outputs)
         open_floating.click(open_floating_noop, js=OPEN_FLOATING_JS)
         if hasattr(gr, "Timer"):

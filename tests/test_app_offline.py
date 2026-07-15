@@ -117,6 +117,9 @@ class OfflineMiddlewareTest(unittest.TestCase):
         body = sent[-1]["body"].decode("utf-8")
         self.assertEqual(sent[0]["status"], 200)
         self.assertIn('"audio_running"', body)
+        self.assertIn('"meeting_material_names"', body)
+        self.assertIn('"suggestion_sources"', body)
+        self.assertIn('"needs_verification"', body)
         self.assertNotIn("SECRET_MARKER_SHOULD_NOT_RENDER", body)
 
     def test_live_floating_route_serves_local_helper_page(self) -> None:
@@ -149,6 +152,11 @@ class OfflineMiddlewareTest(unittest.TestCase):
         self.assertIn("返回主界面", body)
         self.assertIn("window.opener.focus", body)
         self.assertIn("window.close()", body)
+        self.assertIn("needs_verification", body)
+        self.assertIn("suggestion_sources", body)
+        self.assertIn("suggestion-meta", body)
+        self.assertIn("state.suggestion_kind", body)
+        self.assertIn("state.confidence", body)
 
     def test_non_html_payloads_are_byte_preserved(self) -> None:
         cases = [

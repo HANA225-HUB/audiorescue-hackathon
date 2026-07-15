@@ -70,6 +70,8 @@ ffmpeg -version
 AUDIORESCUE_UI_FIXTURE=0 python app.py
 ```
 
+打开页面后进入“实时会议输入”，填写会议场景、身份、听众、目标和议程，可上传 PDF、PPTX、DOCX、TXT 或 Markdown 参考资料。“开始新会议”会同时启动实时音频与一个全新的会议上下文；下一场会议不会继承上一场的转写。增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；生成建议时会发送会议设置、最近转写和命中的资料文字片段，但不上传原始资料文件。戴耳机时系统暂时听不到远端参会者，可在右侧“对方刚刚问了什么”中输入问题，再根据会议资料生成回答。
+
 开发 fixture 启动只用于 UI 状态和离线页面门禁，不代表真实 pipeline 效果：
 
 ```bash
@@ -181,6 +183,6 @@ python scripts/live_gtcrn.py \
   --meeting-material docs/项目论文.pdf
 ```
 
-支持文字型 PDF、PPTX、DOCX、TXT 和 Markdown。扫描 PDF、PPT 图片和图表暂时不会自动 OCR。后续 UI 可以通过 `request_answer(对方问题)` 把听到的问题作为文字传入，避免把自己的最后一句误当成导师提问。
+支持文字型 PDF、PPTX、DOCX、TXT 和 Markdown。扫描 PDF、PPT 图片和图表暂时不会自动 OCR。网页右侧的对方问题输入框会调用 `request_answer(对方问题)`，避免把自己的最后一句误当成导师提问。
 
 当前 ASR 只接收本机麦克风链路。线上会议戴耳机时，它通常听不到导师/对方的声音，因此不能承诺自动识别远端提问；这需要后续增加独立的会议系统音频输入，且不能把该输入再次回送到虚拟麦克风。

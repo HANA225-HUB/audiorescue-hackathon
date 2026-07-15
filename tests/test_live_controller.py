@@ -1,5 +1,7 @@
 import unittest
 import threading
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -10,6 +12,7 @@ from ui.live_controller import (
     DEFAULT_OUTPUT_CHOICE,
     VIRTUAL_OUTPUT_CHOICE,
     LiveUiController,
+    _safe_error,
     snapshot_to_dict,
 )
 
@@ -95,12 +98,23 @@ class _FailingStopEngine(_FakeEngine):
 
 
 class _FakeMeeting:
-    def __init__(self, *, preset="", **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        preset="",
+        session_config=None,
+        knowledge_base=None,
+        **kwargs,
+    ) -> None:
         del kwargs
         self.preset = preset
+        self.session_config = session_config
+        self.knowledge_base = knowledge_base
+        self.session_id = f"fake-session-{id(self)}"
         self.running = False
         self.accepted = []
         self.request_count = 0
+        self.answer_questions = []
         self.suggestion = ""
 
     def start(self) -> None:
@@ -118,6 +132,11 @@ class _FakeMeeting:
         self.suggestion = "建议先确认目标。"
         return True
 
+    def request_answer(self, question: str) -> bool:
+        self.answer_questions.append(question)
+        self.suggestion = f"回答：{question}"
+        return True
+
     def snapshot(self) -> MeetingSnapshot:
         return MeetingSnapshot(
             status="listening" if self.running else "stopped",
@@ -126,6 +145,24 @@ class _FakeMeeting:
             suggestion=self.suggestion,
             error=None,
             asr_dropped_packets=0,
+            session_id=self.session_id,
+            scenario=(
+                self.session_config.scenario.value
+                if self.session_config is not None
+                else "general"
+            ),
+            material_names=(
+                tuple(
+                    record.display_name
+                    for record in self.knowledge_base.list_documents()
+                )
+                if self.knowledge_base is not None
+                else ()
+            ),
+            suggestion_kind="answer" if self.answer_questions else "next_section",
+            suggestion_sources=("指标.md · 第 1 段",) if self.suggestion else (),
+            needs_verification=bool(self.answer_questions),
+            confidence=0.8 if self.suggestion else 0.0,
         )
 
 
@@ -247,6 +284,214 @@ class LiveUiControllerTest(unittest.TestCase):
         self.assertFalse(engines[0].running)
         self.assertEqual(engines[0].stop_calls, 1)
 
+    def test_structured_meeting_builds_preset_and_local_knowledge_base(self) -> None:
+        meetings = []
+        controller = _controller(meeting_instances=meetings)
+        with tempfile.TemporaryDirectory() as tempdir:
+            material = Path(tempdir) / "指标.md"
+            material.write_text("端到端延迟为三十二毫秒。", encoding="utf-8")
+
+            snapshot = controller.start_meeting(
+                "不夸大效果。",
+                title="AudioRescue 答辩",
+                scenario="defense",
+                user_role="学生答辩人",
+                audience="导师和评委",
+                objective="讲清实时降噪效果",
+                agenda="背景\n方案\n实验",
+                focus_points="延迟数字以资料为准",
+                constraints="不编造数字",
+                tone="concise",
+                coach_level="active",
+                material_files=[str(material)],
+            )
+
+        self.assertEqual(len(meetings), 1)
+        config = meetings[0].session_config
+        self.assertEqual(config.title, "AudioRescue 答辩")
+        self.assertEqual(config.scenario.value, "defense")
+        self.assertEqual(config.user_role, "学生答辩人")
+        self.assertEqual(config.agenda, ("背景", "方案", "实验"))
+        self.assertEqual(config.focus_points, ("延迟数字以资料为准",))
+        self.assertEqual(config.constraints, ("不编造数字",))
+        self.assertEqual(config.custom_requirements, "不夸大效果。")
+        self.assertEqual(config.tone, "concise")
+        self.assertEqual(config.coach_level, "active")
+        self.assertEqual(snapshot.meeting_material_names, ("指标.md",))
+        self.assertEqual(snapshot.meeting_scenario, "defense")
+        self.assertTrue(snapshot.meeting_session_id.startswith("fake-session-"))
+
+    def test_one_click_meeting_start_guarantees_audio_sink_is_running(self) -> None:
+        meetings = []
+        engines = []
+        controller = _controller(
+            engine_instances=engines,
+            meeting_instances=meetings,
+        )
+
+        snapshot = controller.start_meeting_with_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "quiet",
+            "不编造数字。",
+            title="会议一键启动",
+            scenario="general",
+        )
+
+        self.assertTrue(snapshot.audio_running)
+        self.assertEqual(snapshot.audio_mode, "quiet")
+        self.assertEqual(snapshot.meeting_status, "listening")
+        self.assertEqual(len(engines), 1)
+        self.assertEqual(len(meetings), 1)
+        self.assertIsNotNone(engines[0].sink)
+
+    def test_one_click_start_replaces_running_meeting_with_fresh_session(self) -> None:
+        meetings = []
+        engines = []
+        controller = _controller(
+            engine_instances=engines,
+            meeting_instances=meetings,
+        )
+
+        first = controller.start_meeting_with_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "enhanced",
+            title="第一场",
+        )
+        second = controller.start_meeting_with_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "quiet",
+            title="第二场",
+        )
+
+        self.assertEqual(len(engines), 1)
+        self.assertEqual(len(meetings), 2)
+        self.assertFalse(meetings[0].running)
+        self.assertTrue(meetings[1].running)
+        self.assertNotEqual(first.meeting_session_id, second.meeting_session_id)
+        self.assertEqual(second.audio_mode, "quiet")
+
+    def test_one_click_meeting_failure_rolls_back_new_audio(self) -> None:
+        engines = []
+
+        def raising_meeting_factory(*args, **kwargs):
+            del args, kwargs
+
+            class _RaisingMeeting:
+                running = False
+
+                def start(self) -> None:
+                    raise RuntimeError("ASR start failed /tmp/audio rescue/private.wav")
+
+            return _RaisingMeeting()
+
+        controller = _controller(
+            engine_instances=engines,
+            meeting_factory=raising_meeting_factory,
+        )
+
+        snapshot = controller.start_meeting_with_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "enhanced",
+            title="启动失败回滚",
+        )
+
+        self.assertFalse(snapshot.audio_running)
+        self.assertFalse(engines[0].running)
+        self.assertEqual(engines[0].stop_calls, 1)
+        self.assertIn("ASR start failed", snapshot.meeting_error)
+        self.assertNotIn("audio rescue", snapshot.meeting_error)
+        self.assertIn("实时音频已停止", snapshot.last_action)
+
+    def test_one_click_meeting_failure_keeps_preexisting_audio(self) -> None:
+        engines = []
+
+        def raising_meeting_factory(*args, **kwargs):
+            del args, kwargs
+
+            class _RaisingMeeting:
+                running = False
+
+                def start(self) -> None:
+                    raise RuntimeError("ASR start failed")
+
+            return _RaisingMeeting()
+
+        controller = _controller(
+            engine_instances=engines,
+            meeting_factory=raising_meeting_factory,
+        )
+        controller.start_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "enhanced",
+        )
+
+        snapshot = controller.start_meeting_with_audio(
+            DEFAULT_INPUT_CHOICE,
+            VIRTUAL_OUTPUT_CHOICE,
+            "enhanced",
+            title="保留原有音频",
+        )
+
+        self.assertTrue(snapshot.audio_running)
+        self.assertTrue(engines[0].running)
+        self.assertEqual(engines[0].stop_calls, 0)
+        self.assertIn("ASR start failed", snapshot.meeting_error)
+
+    def test_invalid_material_fails_before_creating_meeting_and_hides_path(self) -> None:
+        meetings = []
+        controller = _controller(meeting_instances=meetings)
+        with tempfile.TemporaryDirectory() as tempdir:
+            material = Path(tempdir) / "SECRET_MARKER.exe"
+            material.write_text("not a meeting document", encoding="utf-8")
+
+            snapshot = controller.start_meeting(
+                title="资料校验",
+                material_files=[material],
+            )
+
+        self.assertEqual(meetings, [])
+        self.assertIn("不支持的资料格式", snapshot.meeting_error)
+        self.assertNotIn(tempdir, snapshot.meeting_error)
+        self.assertFalse(snapshot.meeting_session_id)
+
+    def test_manual_question_requires_text_and_uses_current_meeting(self) -> None:
+        meetings = []
+        controller = _controller(meeting_instances=meetings)
+
+        not_started = controller.request_answer("延迟是多少？")
+        self.assertIn("未启动", not_started.last_action)
+
+        controller.start_meeting("项目例会")
+        empty = controller.request_answer("   ")
+        self.assertIn("请先输入", empty.last_action)
+        answered = controller.request_answer("端到端延迟是多少？")
+
+        self.assertEqual(meetings[0].answer_questions, ["端到端延迟是多少？"])
+        self.assertEqual(answered.suggestion, "回答：端到端延迟是多少？")
+        self.assertTrue(answered.needs_verification)
+        self.assertEqual(answered.suggestion_kind, "answer")
+        self.assertEqual(answered.suggestion_sources, ("指标.md · 第 1 段",))
+
+    def test_stop_then_start_creates_a_fresh_meeting_instance(self) -> None:
+        meetings = []
+        controller = _controller(meeting_instances=meetings)
+
+        first = controller.start_meeting("第一场")
+        controller.request_next_line()
+        controller.stop_meeting()
+        second = controller.start_meeting("第二场")
+
+        self.assertEqual(len(meetings), 2)
+        self.assertNotEqual(first.meeting_session_id, second.meeting_session_id)
+        self.assertEqual(second.suggestion, "")
+        self.assertEqual(meetings[0].preset, "第一场")
+        self.assertEqual(meetings[1].preset, "第二场")
+
     def test_meeting_start_error_is_sanitized_in_snapshot(self) -> None:
         def raising_meeting_factory(*args, **kwargs):
             del args, kwargs
@@ -268,6 +513,16 @@ class LiveUiControllerTest(unittest.TestCase):
         self.assertNotIn("fake_secret_value", snapshot.meeting_error)
         self.assertNotIn("/tmp/audiorescue-test", snapshot.meeting_error)
 
+    def test_safe_error_redacts_absolute_paths_containing_spaces(self) -> None:
+        rendered = _safe_error(
+            'failed "/tmp/audio rescue/private.wav" and '
+            r"C:\Users\Secret Person\meeting.wav"
+        )
+
+        self.assertNotIn("audio rescue", rendered)
+        self.assertNotIn("Secret Person", rendered)
+        self.assertGreaterEqual(rendered.count("[路径]"), 2)
+
     def test_snapshot_to_dict_does_not_require_runtime_instances(self) -> None:
         controller = _controller()
         snapshot = controller.snapshot()
@@ -277,6 +532,8 @@ class LiveUiControllerTest(unittest.TestCase):
         self.assertFalse(payload["audio_running"])
         self.assertEqual(payload["meeting_status"], "stopped")
         self.assertIn("last_action", payload)
+        self.assertIn("meeting_material_names", payload)
+        self.assertIn("needs_verification", payload)
 
     def test_default_speaker_output_is_blocked_before_engine_creation(self) -> None:
         engines = []

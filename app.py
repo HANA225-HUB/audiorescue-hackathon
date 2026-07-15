@@ -85,6 +85,11 @@ FLOATING_HTML = """<!doctype html>
   <div class="card">
     <header><span class="dot"></span><span id="status">连接中</span></header>
     <h1 id="suggestion">暂无建议</h1>
+    <p id="suggestion-meta">建议状态：待生成</p>
+    <section>
+      <h2 id="verification">会议上下文</h2>
+      <p id="sources">暂无资料引用</p>
+    </section>
     <section>
       <h2>实时字幕</h2>
       <p id="partial">暂无实时字幕</p>
@@ -114,6 +119,22 @@ async function refresh() {
     const state = await response.json();
     document.getElementById("status").textContent = "会议助手 · " + state.meeting_status;
     document.getElementById("suggestion").textContent = state.suggestion || "暂无建议";
+    const kindLabels = {
+      answer: "问题回答",
+      next_section: "下一段提示",
+      clarify: "澄清建议",
+      correction: "修正提示"
+    };
+    const kind = kindLabels[state.suggestion_kind] || "待生成";
+    const confidence = Number(state.confidence || 0);
+    document.getElementById("suggestion-meta").textContent = confidence > 0
+      ? kind + " · 置信度 " + Math.round(confidence * 100) + "%"
+      : kind;
+    document.getElementById("verification").textContent = state.needs_verification
+      ? "⚠ 这条建议需要核实"
+      : "会议上下文";
+    const sources = (state.suggestion_sources || []).join(" / ");
+    document.getElementById("sources").textContent = sources || "未引用会议资料";
     document.getElementById("partial").textContent = state.partial_text || "暂无实时字幕";
     const transcript = (state.transcript || []).slice(-5).join("\\n");
     document.getElementById("transcript").textContent = transcript || "暂无正式字幕";

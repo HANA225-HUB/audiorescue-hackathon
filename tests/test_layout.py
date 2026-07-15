@@ -22,6 +22,7 @@ from ui.layout import (
     OPEN_FLOATING_JS,
     OfflineHtmlResourceMiddleware,
     SCROLL_TOP_JS,
+    _escape_md,
     _fixture_mode_default,
     _read_css,
     _run,
@@ -117,6 +118,21 @@ def _valid_transcript(text: str = "ok") -> dict[str, object]:
 
 
 class LayoutSafetyTest(unittest.TestCase):
+    def test_live_markdown_values_are_rendered_as_plain_text(self) -> None:
+        rendered = _escape_md("![remote](https://example.test/x.png) **bold**")
+
+        self.assertIn(r"\!\[remote\]", rendered)
+        self.assertIn(r"\*\*bold\*\*", rendered)
+
+    def test_meeting_privacy_copy_discloses_audio_and_text_cloud_processing(self) -> None:
+        source = Path(__file__).parents[1].joinpath("ui", "layout.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("增强后的麦克风音频", source)
+        self.assertIn("阿里云 Fun-ASR", source)
+        self.assertIn("不上传原始 PDF/PPT/DOCX 文件", source)
+
     def test_competition_startup_uses_real_pipeline_by_default(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(_fixture_mode_default())
@@ -340,7 +356,17 @@ class LayoutSafetyTest(unittest.TestCase):
         labels = [str(kwargs.get("label", "")) for _, _, kwargs in calls]
         self.assertNotIn("开发专用：使用前端 fixture 假数据", labels)
         self.assertEqual([kwargs.get("label") for kind, _, kwargs in calls if kind == "Audio"], ["上传音频"])
-        self.assertFalse(any(kind == "File" for kind, _, _ in calls))
+        material_files = [
+            kwargs for kind, _, kwargs in calls if kind == "File"
+        ]
+        self.assertEqual(len(material_files), 1)
+        self.assertEqual(material_files[0]["label"], "会议参考资料（最多 10 份）")
+        self.assertEqual(material_files[0]["file_count"], "multiple")
+        self.assertEqual(material_files[0]["type"], "filepath")
+        self.assertEqual(
+            material_files[0]["file_types"],
+            [".pdf", ".pptx", ".docx", ".txt", ".md"],
+        )
         self.assertFalse(any(kind == "Image" for kind, _, _ in calls))
         self.assertTrue(any(kind == "State" for kind, _, _ in calls))
         self.assertTrue(any(event == "click" for event, _, _ in events))
@@ -356,8 +382,27 @@ class LayoutSafetyTest(unittest.TestCase):
             "后音频降噪增强处理",
             "实时会议输入",
             "开始急救",
+            "开始新会议（同时启动音频）",
+            "根据会议资料生成回答",
         ):
             self.assertIn(expected, button_texts)
+        for expected_label in (
+            "会议名称",
+            "使用场景",
+            "我的身份",
+            "参会者 / 听众",
+            "这次会议的目标",
+            "议程 / 汇报顺序（每行一项）",
+            "对方刚刚问了什么？",
+        ):
+            self.assertIn(expected_label, labels)
+        markdown_text = "\n".join(
+            str(args[0])
+            for kind, args, _ in calls
+            if kind == "Markdown" and args
+        )
+        self.assertIn("资料在本地解析和检索", markdown_text)
+        self.assertIn("扫描 PDF 和 PPT 图片暂不 OCR", markdown_text)
         visible_columns = [
             kwargs.get("visible")
             for kind, _, kwargs in calls
