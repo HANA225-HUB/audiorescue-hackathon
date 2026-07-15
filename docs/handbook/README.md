@@ -26,6 +26,13 @@
 5. 任一可选模块失败时，P0 仍能完成；
 6. 五分钟内完成一次不慌乱的现场演示。
 
+### 当前冻结集成事实
+
+- 冻结候选 heads：C PR #1 `5f5addfa504164c3463a512a98e8b6878c091de7`、A PR #8 `31b35aaa1bfd523c29b6d53312b883b6710a8caf`、B PR #5 `2650d5bd5d3c968012be28a70b2799bfe87da467`、协作文档 PR #7 `934c44ba7a542c26af4af12c4567e59c5c237c04`。
+- 四方只读组合门禁已通过：无冲突，targeted 185 OK / 1 skipped，full 285 OK / 1 skipped，`py_compile`、diff、repo-safety、fixture 浏览器、隐私和 UI-core 契约检查均通过。
+- 这些结论只说明当前冻结候选可进入 C 集成审查；PR #5/#7/#8 均未合并，PR #8 与公开文档 PR #9 仍为 draft，不能写成 main 已包含、比赛 ready 或效果验收完成。
+- fixture 只证明 UI/离线/协议，不证明真实增强或识别质量；历史本地 CPU smoke 只作为技术门禁证据；服务器 GPU 补证仍为 provisional。
+
 CLAP 环境事件识别是 P1。只有 7 月 15 日 15:00 前 P0 已稳定，才允许投入；7 月 15 日 18:00 无法稳定就删除。真实流式、训练模型、多麦阵列、移动端和账号系统均不做。
 
 ## 2. 文档阅读顺序

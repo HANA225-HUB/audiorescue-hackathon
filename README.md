@@ -15,7 +15,8 @@
 - `v0.1-contract`：公共数据结构与 A 音频后端接口已经冻结；
 - C 集成分支已实现 `process_audio` 编排、中文 CER、透明缓存、P1 隔离壳、结果持久化与集成测试；
 - C 的自动测试使用确定性假后端，不代表 DeepFilterNet/Whisper 已完成真实推理验收；
-- A 的音频模块与 B 的页面/可视化已在候选 PR 中验证；最终组合复验已报告无 P0/P1，仍需 C Review、冻结与人工合并决策后才能宣称最终通过；
+- 当前冻结候选 heads：C PR #1 `5f5addfa504164c3463a512a98e8b6878c091de7`、A PR #8 `31b35aaa1bfd523c29b6d53312b883b6710a8caf`、B PR #5 `2650d5bd5d3c968012be28a70b2799bfe87da467`、协作文档 PR #7 `934c44ba7a542c26af4af12c4567e59c5c237c04`；
+- 四方只读组合验收已通过：无冲突，targeted 185 OK / 1 skipped，full 285 OK / 1 skipped，`py_compile`、`git diff --check`、repo-safety、fixture 浏览器、隐私扫描和 UI-core 契约检查均通过；PR #5/#8/#7 仍未合并，PR #8 与公开文档 PR #9 仍为 draft，不能宣称 main 已包含或比赛 ready；
 - 本仓库当前为三人共享的公开仓库；只有受邀协作者可直接写入；
 - 模型、外部数据集、用户音频和运行产物不会提交到 Git；
 - `tests/fixtures/` 中的合成音频只用于联调，不作为比赛效果证据。
@@ -158,4 +159,4 @@ python scripts/smoke_audio_core.py --normalize-only
 python scripts/smoke_audio_core.py --runs 2 --asr-model base --device auto
 ```
 
-公开报告只记录版本、耗时、指纹摘要、测试数量和成功/失败状态。不得公开原始日志、私有文本、机器路径、服务器路径或模型缓存位置。正式 DeepFilterNet/Whisper、GPU 性能和听感必须由最终组合复验与人工验收补齐。
+公开报告只记录版本、耗时、指纹摘要、测试数量和成功/失败状态。不得公开原始日志、私有文本、机器路径、服务器路径或模型缓存位置。历史本地 CPU smoke 只能作为技术门禁证据；服务器 GPU 补证仍为 provisional，不作为正式速度证据。真实用户样例、听感和效果验收仍需最终人工执行。

@@ -9,6 +9,14 @@ This runbook is the shortest public path for preparing and running the competiti
 - Real smoke: only with approved short samples and already-prepared model assets.
 - No server, tunnel, public URL, private recording, frozen test split, or remote model operation is part of the live demo path.
 
+## Current Integration Facts
+
+- Frozen candidate heads: C PR #1 `5f5addfa504164c3463a512a98e8b6878c091de7`, A PR #8 `31b35aaa1bfd523c29b6d53312b883b6710a8caf`, B PR #5 `2650d5bd5d3c968012be28a70b2799bfe87da467`, collaboration docs PR #7 `934c44ba7a542c26af4af12c4567e59c5c237c04`.
+- AR-R3-B-021 four-way read-only integration gate passed with no conflicts, targeted 185 OK / 1 skipped, full 285 OK / 1 skipped, and passing compile, diff, repo-safety, fixture browser, privacy, and UI-core contract checks.
+- PR #5, PR #7, and PR #8 are frozen for integration but not merged. PR #8 and this public docs PR remain draft.
+- Fixture evidence proves offline UI, state, delivery, and protocol behavior only. It does not prove real enhancement, recognition quality, or user acceptance.
+- Historical local CPU smoke is technical gate evidence. Server/GPU supplement remains provisional and is not formal speed evidence.
+
 ## Environment Rules
 
 - Use Python 3.10 or 3.11.
