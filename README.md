@@ -39,7 +39,7 @@
 2. 只从 [`core/schemas.py`](core/schemas.py) 导入公共类型与异常；
 3. 使用不含人声的 `tests/fixtures/dev_smoke_s01_fan.wav` 验证音频 I/O/增强，再用私有台账中已授权的短样例验证双路 ASR；
 4. 先独立提交 A 的三个模块和测试，不修改 `pipeline.py`；
-5. 返回调用示例、真实输出、耗时、模型位置、已知问题和回滚方式。
+5. 只返回版本、指纹前缀、耗时、通过状态、脱敏问题摘要和回滚方式；原始输出、路径、模型位置与素材信息仅记录在未跟踪的本地私有台账中。
 
 完整的两天执行手册已同步到 [`docs/handbook/`](docs/handbook/README.md)。若旧手册与实际代码契约冲突，以 `core/schemas.py`、`configs/app.yaml` 和 `docs/A_BACKEND_CONTRACT_V1.md` 为准。
 
