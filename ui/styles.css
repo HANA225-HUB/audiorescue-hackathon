@@ -17,6 +17,7 @@
   --ar-code-line: #e0e7f0;
   --ar-process-bg: #eef6fb;
   --ar-notice-bg: #fff9e8;
+  --ar-notice-text: #5c4300;
   --ar-status-success-bg: #eaf7ef;
   --ar-status-success-text: #17603a;
   --ar-status-success-line: #287a4b;
@@ -118,11 +119,11 @@ body,
 
 .ar-notice,
 .ar-process-note {
-  color: var(--ar-muted);
   font-size: 14px;
 }
 
 .ar-notice {
+  color: var(--ar-notice-text) !important;
   border-left: 3px solid var(--ar-yellow);
   background: var(--ar-notice-bg);
   border-radius: 6px;
@@ -130,7 +131,14 @@ body,
   margin: 6px 0 !important;
 }
 
+.ar-notice .prose,
+.ar-notice .md,
+.ar-notice p {
+  color: var(--ar-notice-text) !important;
+}
+
 .ar-process-note {
+  color: var(--ar-muted);
   border: 1px solid var(--ar-line);
   background: var(--ar-process-bg);
   border-radius: 8px;
@@ -483,6 +491,7 @@ video {
     --ar-code-line: #3a4658;
     --ar-process-bg: #172437;
     --ar-notice-bg: #3a2a08;
+    --ar-notice-text: #ffe3a3;
     --ar-status-success-bg: #173323;
     --ar-status-success-text: #8eedb2;
     --ar-status-success-line: #45b274;
@@ -530,7 +539,6 @@ video {
   }
 
   .ar-hero p,
-  .ar-notice,
   .ar-process-note,
   .ar-status-facts dt,
   .ar-runtime-panel td:last-child,
