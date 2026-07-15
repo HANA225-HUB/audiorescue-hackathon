@@ -161,3 +161,26 @@ python scripts/live_gtcrn.py \
 ```
 
 终端会显示实时字幕和 `[建议]`；按 `N` 可以立即生成下一句建议。转写只在一句结束后触发千问，不会让网络请求阻塞实时降噪。
+
+答辩、组会或比赛汇报可以在会前把身份、目标、议程和资料分开配置。每次启动都会创建新的会议上下文；资料先在本地解析和检索。每次调用会把会议设置、最近转写和当前问题命中的资料片段发给阿里云千问，不上传 PDF/PPT/DOCX 原始文件。很短的文字资料可能大部分或全部落入一个命中片段，请只使用已获授权的参会内容和资料，并避免放入不必要的敏感信息：
+
+```bash
+python scripts/live_gtcrn.py \
+  --input-device 1 \
+  --virtual-mic \
+  --meeting \
+  --meeting-name "AudioRescue 项目答辩" \
+  --meeting-scenario defense \
+  --meeting-role "项目成员" \
+  --meeting-audience "导师和评委" \
+  --meeting-objective "讲清实时降噪、会议助手和实测结果" \
+  --meeting-agenda "问题背景,实时降噪,会议助手,实验结果,总结" \
+  --meeting-focus "遇到实验数字时必须以资料为准" \
+  --meeting-preset "回答简洁，不夸大效果；一段讲完后再提示下一段。" \
+  --meeting-material docs/答辩稿.pptx \
+  --meeting-material docs/项目论文.pdf
+```
+
+支持文字型 PDF、PPTX、DOCX、TXT 和 Markdown。扫描 PDF、PPT 图片和图表暂时不会自动 OCR。后续 UI 可以通过 `request_answer(对方问题)` 把听到的问题作为文字传入，避免把自己的最后一句误当成导师提问。
+
+当前 ASR 只接收本机麦克风链路。线上会议戴耳机时，它通常听不到导师/对方的声音，因此不能承诺自动识别远端提问；这需要后续增加独立的会议系统音频输入，且不能把该输入再次回送到虚拟麦克风。

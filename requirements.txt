@@ -15,3 +15,4 @@ sherpa-onnx==1.13.4
 sounddevice==0.5.5
 soxr==1.1.0
 websocket-client==1.9.0
+pypdf>=5,<7

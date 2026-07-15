@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -16,11 +17,22 @@ from typing import Callable
 
 import numpy as np
 
+from .meeting_context import (
+    AdviceResult,
+    MeetingAdviceRequest,
+    MeetingKnowledgeBase,
+    MeetingPreset,
+    MeetingSession,
+    redact_text,
+)
 from .realtime_asr import DashscopeRealtimeAsr, RealtimeAsrEvent
 
 
 DEFAULT_QWEN_URL = (
     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+)
+_TRUSTED_DASHSCOPE_HOSTS = frozenset(
+    {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
 )
 _ADVICE_SENTINEL = object()
 _QUESTION_WORDS = re.compile(
@@ -28,29 +40,6 @@ _QUESTION_WORDS = re.compile(
     r"有没有|多少|谁|哪里|哪个|哪些|什么时候|几点)"
 )
 _QUESTION_TAIL = re.compile(r"[吗么呢嘛]\s*[。！!]?\s*$")
-_REDACTIONS = (
-    (
-        re.compile(
-            r"(?i)DASHSCOPE_API_KEY\s*=\s*\S+|\bsk-[A-Za-z0-9_-]{8,}\b"
-        ),
-        "[密钥]",
-    ),
-    (
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-        "[邮箱]",
-    ),
-    (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "[手机号]"),
-    (re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"), "[身份证]"),
-)
-
-
-def redact_text(text: str) -> str:
-    result = str(text)
-    for pattern, replacement in _REDACTIONS:
-        result = pattern.sub(replacement, result)
-    return result
-
-
 def is_question(text: str) -> bool:
     normalized = " ".join(str(text).split())
     return bool(
@@ -70,6 +59,18 @@ def _plain_short_text(text: str, max_chars: int = 120) -> str:
     return cleaned[:max_chars]
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del fp, msg, headers, newurl
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "模型服务重定向已被安全策略拒绝。",
+            {},
+            None,
+        )
+
+
 @dataclass(frozen=True)
 class MeetingSnapshot:
     status: str
@@ -78,6 +79,13 @@ class MeetingSnapshot:
     suggestion: str
     error: str | None
     asr_dropped_packets: int
+    session_id: str = ""
+    scenario: str = "general"
+    material_names: tuple[str, ...] = ()
+    suggestion_kind: str = ""
+    suggestion_sources: tuple[str, ...] = ()
+    needs_verification: bool = False
+    confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,9 @@ class _AdviceJob:
     preset: str
     context: str
     trigger: str
+    session_id: str = ""
+    latest_text: str = ""
+    context_version: int = 0
 
 
 class QwenStreamingAdvisor:
@@ -97,22 +108,37 @@ class QwenStreamingAdvisor:
         endpoint: str = DEFAULT_QWEN_URL,
         model: str = "qwen3.6-flash",
         timeout: float = 20.0,
-        max_tokens: int = 96,
+        max_tokens: int = 240,
+        allow_custom_endpoint: bool = False,
         urlopen=None,
     ) -> None:
+        parsed_endpoint = urllib.parse.urlparse(endpoint)
+        if parsed_endpoint.scheme != "https":
+            raise ValueError("模型地址必须使用 HTTPS。")
+        trusted_dashscope = (
+            bool(parsed_endpoint.hostname)
+            and parsed_endpoint.hostname.casefold() in _TRUSTED_DASHSCOPE_HOSTS
+        )
+        if not trusted_dashscope and not allow_custom_endpoint:
+            raise ValueError(
+                "为避免泄露 API Key，模型地址默认只允许 DashScope 官方 HTTPS 域名；"
+                "确需自定义地址时必须显式设置 allow_custom_endpoint=True。"
+            )
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
         self.endpoint = endpoint
         self.model = model
         self.timeout = float(timeout)
         self.max_tokens = int(max_tokens)
-        self._urlopen = urlopen or urllib.request.urlopen
+        self._urlopen = urlopen or urllib.request.build_opener(
+            _NoRedirectHandler()
+        ).open
 
     def _request(self, preset: str, transcript: str, trigger: str):
         if not self.api_key:
             raise RuntimeError("未找到 DASHSCOPE_API_KEY。")
         task = (
             "请直接回答对方最新的问题，给出我现在可以说出口的回答。"
-            if trigger == "question"
+            if trigger in {"question", "manual_answer"}
             else "请给出我接下来最合适说的一句话。"
         )
         system_prompt = (
@@ -121,11 +147,14 @@ class QwenStreamingAdvisor:
             "只输出一条可直接说出口的中文建议，最多两句、120字；"
             "不确定的信息要说需要核实。不要输出分析、标题或Markdown，不要编造数字。"
         )
-        user_prompt = (
-            f"<MEETING_PRESET>{redact_text(preset)[:1500]}</MEETING_PRESET>\n"
-            f"<UNTRUSTED_TRANSCRIPT>{redact_text(transcript)[-2600:]}"
-            "</UNTRUSTED_TRANSCRIPT>\n"
-            f"<TASK>{task}</TASK>"
+        user_prompt = json.dumps(
+            {
+                "meeting_preset": redact_text(preset)[:1500],
+                "untrusted_transcript": redact_text(transcript)[-2600:],
+                "task": task,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         payload = {
             "model": self.model,
@@ -149,15 +178,34 @@ class QwenStreamingAdvisor:
             method="POST",
         )
 
-    def generate(
+    def _structured_request(self, request: MeetingAdviceRequest):
+        if not self.api_key:
+            raise RuntimeError("未找到 DASHSCOPE_API_KEY。")
+        payload = {
+            "model": self.model,
+            "messages": request.to_messages(),
+            "enable_thinking": False,
+            "stream": True,
+            "max_tokens": self.max_tokens,
+            "temperature": 0.1,
+        }
+        return urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+
+    def _read_stream(
         self,
-        preset: str,
-        transcript: str,
-        trigger: str,
+        request,
         *,
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
-        request = self._request(preset, transcript, trigger)
         parts: list[str] = []
         try:
             with self._urlopen(request, timeout=self.timeout) as response:
@@ -184,10 +232,39 @@ class QwenStreamingAdvisor:
             raise RuntimeError(f"千问请求失败（HTTP {exc.code}）。") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError("无法连接千问服务。") from exc
-        result = _plain_short_text("".join(parts))
+        return "".join(parts)
+
+    def generate(
+        self,
+        preset: str,
+        transcript: str,
+        trigger: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
+        request = self._request(preset, transcript, trigger)
+        result = _plain_short_text(self._read_stream(request, on_delta=on_delta))
         if not result:
             raise RuntimeError("千问没有返回可用建议。")
         return result
+
+    def generate_advice(
+        self,
+        request: MeetingAdviceRequest,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AdviceResult:
+        """Generate and validate one structured suggestion.
+
+        JSON deltas are intentionally buffered.  The UI only receives a final,
+        validated result rather than half of an object.
+        """
+
+        del on_delta
+        raw = self._read_stream(self._structured_request(request))
+        if not raw.strip():
+            raise RuntimeError("千问没有返回可用建议。")
+        return AdviceResult.from_model_text(raw, request=request)
 
 
 class LiveMeetingAssistant:
@@ -198,6 +275,8 @@ class LiveMeetingAssistant:
         *,
         api_key: str | None = None,
         preset: str = "",
+        session_config: MeetingPreset | None = None,
+        knowledge_base: MeetingKnowledgeBase | None = None,
         suggestion_interval: float = 8.0,
         final_silence_ms: int = 600,
         language_hint: str | None = "zh",
@@ -210,7 +289,21 @@ class LiveMeetingAssistant:
         if suggestion_interval < 0:
             raise ValueError("suggestion_interval 必须为非负数。")
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
-        self.preset = redact_text(preset)[:1500]
+        if session_config is not None and not isinstance(session_config, MeetingPreset):
+            raise TypeError("session_config 必须是 MeetingPreset。")
+        if knowledge_base is not None and not isinstance(
+            knowledge_base, MeetingKnowledgeBase
+        ):
+            raise TypeError("knowledge_base 必须是 MeetingKnowledgeBase。")
+        self._session_config = session_config or MeetingPreset.from_legacy(preset)
+        self._knowledge_base = knowledge_base or MeetingKnowledgeBase()
+        self.preset = (
+            redact_text(preset)[:1500]
+            if session_config is None
+            else json.dumps(
+                self._session_config.to_prompt_dict(), ensure_ascii=False
+            )[:4_000]
+        )
         self.suggestion_interval = float(suggestion_interval)
         self.final_silence_ms = int(final_silence_ms)
         self.language_hint = language_hint
@@ -225,6 +318,10 @@ class LiveMeetingAssistant:
         self._partial = ""
         self._transcript: deque[str] = deque(maxlen=20)
         self._suggestion = ""
+        self._suggestion_kind = ""
+        self._suggestion_sources: tuple[str, ...] = ()
+        self._needs_verification = False
+        self._confidence = 0.0
         self._error: str | None = None
         self._last_advice_at = float("-inf")
         self._advice_queue: queue.Queue[object] = queue.Queue(maxsize=1)
@@ -232,10 +329,15 @@ class LiveMeetingAssistant:
         self._advisor_cancel = threading.Event()
         self._asr = None
         self._running = False
+        self._session: MeetingSession | None = None
 
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def session(self) -> MeetingSession | None:
+        return self._session
 
     def _set_status(self, status: str) -> None:
         with self._lock:
@@ -254,13 +356,34 @@ class LiveMeetingAssistant:
             self._advice_queue.put_nowait(job)
         except queue.Full:
             try:
-                self._advice_queue.get_nowait()
+                existing = self._advice_queue.get_nowait()
             except queue.Empty:
-                pass
+                existing = None
+            priorities = {
+                "manual_answer": 100,
+                "question": 95,
+                "manual_next": 90,
+                "next_line": 20,
+            }
+            if isinstance(existing, _AdviceJob) and priorities.get(
+                existing.trigger, 0
+            ) > priorities.get(job.trigger, 0):
+                job = existing
             try:
                 self._advice_queue.put_nowait(job)
             except queue.Full:
                 pass
+
+    def _make_job(self, trigger: str, latest_text: str = "") -> _AdviceJob:
+        session = self._session
+        return _AdviceJob(
+            preset=self.preset,
+            context=self._context_text(),
+            trigger=trigger,
+            session_id=session.session_id if session is not None else "",
+            latest_text=latest_text,
+            context_version=(session.context_version if session is not None else 0),
+        )
 
     def _on_asr_event(self, event: RealtimeAsrEvent) -> None:
         clean = redact_text(event.text).strip()
@@ -279,40 +402,89 @@ class LiveMeetingAssistant:
             if event.is_final:
                 self._partial = ""
                 self._transcript.append(clean)
-                if self._running:
+                if self._running and self._session_config.coach_level != "manual":
                     if is_question(clean):
                         trigger = "question"
-                    elif now - self._last_advice_at >= self.suggestion_interval:
-                        trigger = "next_line"
+                    else:
+                        minimum_interval = (
+                            5.0
+                            if self._session_config.coach_level == "active"
+                            else 15.0
+                        )
+                        effective_interval = max(
+                            self.suggestion_interval, minimum_interval
+                        )
+                        if now - self._last_advice_at >= effective_interval:
+                            trigger = "next_line"
                 if trigger is not None:
                     self._last_advice_at = now
             else:
                 self._partial = clean
+        if event.is_final and self._session is not None:
+            self._session.append_turn(
+                clean,
+                source="self_mic",
+                speaker_role="unknown",
+                speaker_confidence=0.0,
+                timestamp_ms=event.end_time_ms,
+            )
         if self.on_transcript is not None:
             try:
                 self.on_transcript(normalized)
             except Exception:
                 pass
         if trigger is not None:
-            self._offer_job(
-                _AdviceJob(
-                    preset=self.preset,
-                    context=self._context_text(),
-                    trigger=trigger,
-                )
-            )
+            self._offer_job(self._make_job(trigger, clean))
 
     def request_next_line(self) -> bool:
         if not self._running:
             return False
-        self._offer_job(
-            _AdviceJob(
-                preset=self.preset,
-                context=self._context_text(),
-                trigger="next_line",
-            )
-        )
+        self._offer_job(self._make_job("manual_next"))
         return True
+
+    def request_answer(self, question: str = "") -> bool:
+        """Manually ask for an answer when the current mic cannot hear the other side."""
+
+        if not self._running:
+            return False
+        latest = redact_text(question).strip()
+        if not latest:
+            return False
+        with self._lock:
+            self._transcript.append(latest)
+        if self._session is not None:
+            self._session.append_turn(
+                latest,
+                source="manual_input",
+                speaker_role="other",
+                speaker_confidence=1.0,
+            )
+        self._offer_job(self._make_job("manual_answer", latest))
+        return True
+
+    def set_agenda_index(self, index: int) -> bool:
+        if self._session is None:
+            return False
+        self._session.set_agenda_index(index)
+        return True
+
+    def clear_session(self, *, clear_materials: bool = False) -> None:
+        """Clear local transcript/advice state after a stopped meeting."""
+
+        if self._running:
+            raise RuntimeError("请先停止会议助手，再清除会议内容。")
+        with self._lock:
+            self._session = None
+            self._transcript.clear()
+            self._partial = ""
+            self._suggestion = ""
+            self._suggestion_kind = ""
+            self._suggestion_sources = ()
+            self._needs_verification = False
+            self._confidence = 0.0
+            self._error = None
+            if clear_materials:
+                self._knowledge_base = MeetingKnowledgeBase()
 
     def _append_suggestion(self, delta: str) -> None:
         if self._advisor_cancel.is_set():
@@ -326,27 +498,101 @@ class LiveMeetingAssistant:
             except Exception:
                 pass
 
+    def _job_is_current(self, item: _AdviceJob) -> bool:
+        session = self._session
+        if not item.session_id:
+            return session is None
+        return (
+            session is not None
+            and session.session_id == item.session_id
+            and session.context_version == item.context_version
+        )
+
+    def _discard_stale_suggestion(self) -> None:
+        with self._lock:
+            self._suggestion = ""
+            self._suggestion_kind = ""
+            self._suggestion_sources = ()
+            self._needs_verification = False
+            self._confidence = 0.0
+            self._status = "listening" if self._running else "stopped"
+        if self.on_suggestion is not None:
+            try:
+                self.on_suggestion("", False)
+            except Exception:
+                pass
+
     def _run_advisor(self) -> None:
         while True:
             item = self._advice_queue.get()
             if item is _ADVICE_SENTINEL:
                 return
             assert isinstance(item, _AdviceJob)
+            session = self._session
+            if not self._job_is_current(item):
+                continue
             with self._lock:
                 self._status = "thinking"
                 self._suggestion = ""
+                self._suggestion_kind = ""
+                self._suggestion_sources = ()
+                self._needs_verification = False
+                self._confidence = 0.0
                 self._error = None
             try:
-                result = self._advisor.generate(
-                    item.preset,
-                    item.context,
-                    item.trigger,
-                    on_delta=self._append_suggestion,
+                supports_structured = callable(
+                    getattr(self._advisor, "generate_advice", None)
                 )
+                use_structured = session is not None and supports_structured
+                if use_structured:
+                    request = session.build_request(item.trigger, item.latest_text)
+                    advice = self._advisor.generate_advice(request, on_delta=None)
+                    if not isinstance(advice, AdviceResult):
+                        raise TypeError("结构化顾问必须返回 AdviceResult。")
+                    if not session.is_current(
+                        request.session_id,
+                        request.context_version,
+                        max_staleness=0,
+                    ):
+                        with self._lock:
+                            self._status = "listening" if self._running else "stopped"
+                        continue
+                    result = advice.say_now if advice.action == "show" else ""
+                else:
+                    if session is not None and session.material_names:
+                        raise RuntimeError(
+                            "当前顾问不支持资料证据，已拒绝无证据降级。"
+                        )
+                    request = None
+                    advice = None
+                    stale_stream_cleared = False
+
+                    def append_legacy_delta(delta: str) -> None:
+                        nonlocal stale_stream_cleared
+                        if self._job_is_current(item):
+                            self._append_suggestion(delta)
+                        elif not stale_stream_cleared:
+                            stale_stream_cleared = True
+                            self._discard_stale_suggestion()
+
+                    result = self._advisor.generate(
+                        item.preset,
+                        item.context,
+                        item.trigger,
+                        on_delta=append_legacy_delta,
+                    )
                 if self._advisor_cancel.is_set():
+                    continue
+                if not self._job_is_current(item):
+                    self._discard_stale_suggestion()
                     continue
                 with self._lock:
                     self._suggestion = result
+                    if advice is not None:
+                        self._suggestion_kind = advice.kind
+                        self._suggestion_sources = advice.sources
+                        self._needs_verification = advice.needs_verification
+                        self._confidence = advice.confidence
                     self._status = "listening"
                 if self.on_suggestion is not None:
                     try:
@@ -367,13 +613,26 @@ class LiveMeetingAssistant:
             self._advisor_thread = None
         if not self.api_key:
             raise RuntimeError("未找到 DASHSCOPE_API_KEY。")
+        new_session = MeetingSession(
+            config=self._session_config,
+            knowledge_base=self._knowledge_base,
+        )
         with self._lock:
+            self._session = new_session
             self._status = "connecting"
             self._partial = ""
             self._transcript.clear()
             self._suggestion = ""
+            self._suggestion_kind = ""
+            self._suggestion_sources = ()
+            self._needs_verification = False
+            self._confidence = 0.0
             self._error = None
-            self._last_advice_at = float("-inf")
+            self._last_advice_at = (
+                float("-inf")
+                if self._session_config.coach_level == "active"
+                else self._clock()
+            )
         while not self._advice_queue.empty():
             try:
                 self._advice_queue.get_nowait()
@@ -420,6 +679,7 @@ class LiveMeetingAssistant:
 
     def snapshot(self) -> MeetingSnapshot:
         with self._lock:
+            session = self._session
             return MeetingSnapshot(
                 status=self._status,
                 partial_text=self._partial,
@@ -429,6 +689,20 @@ class LiveMeetingAssistant:
                 asr_dropped_packets=(
                     self._asr.dropped_audio_packets if self._asr is not None else 0
                 ),
+                session_id=session.session_id if session is not None else "",
+                scenario=self._session_config.scenario.value,
+                material_names=(
+                    session.material_names
+                    if session is not None
+                    else tuple(
+                        record.display_name
+                        for record in self._knowledge_base.list_documents()
+                    )
+                ),
+                suggestion_kind=self._suggestion_kind,
+                suggestion_sources=self._suggestion_sources,
+                needs_verification=self._needs_verification,
+                confidence=self._confidence,
             )
 
     def stop(self) -> None:

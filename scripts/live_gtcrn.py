@@ -25,6 +25,11 @@ from core.live_denoise import (  # noqa: E402
     ensure_gtcrn_model,
 )
 from core.meeting_assistant import LiveMeetingAssistant  # noqa: E402
+from core.meeting_context import (  # noqa: E402
+    MeetingKnowledgeBase,
+    MeetingPreset,
+    MeetingScenario,
+)
 from core.realtime_asr import RealtimeAsrEvent  # noqa: E402
 
 
@@ -85,6 +90,53 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--meeting-preset", help="会前角色、目标和背景预设")
     parser.add_argument(
         "--meeting-preset-file", type=Path, help="从 UTF-8 文本文件读取会前预设"
+    )
+    parser.add_argument("--meeting-name", default="", help="本次会议名称")
+    parser.add_argument(
+        "--meeting-scenario",
+        choices=tuple(item.value for item in MeetingScenario),
+        default=MeetingScenario.GENERAL.value,
+        help="会议场景：普通会议、答辩、组会、项目汇报或自定义",
+    )
+    parser.add_argument("--meeting-role", default="", help="你在会议中的身份")
+    parser.add_argument("--meeting-audience", default="", help="听众或对方身份")
+    parser.add_argument("--meeting-objective", default="", help="本次会议目标")
+    parser.add_argument(
+        "--meeting-agenda",
+        action="append",
+        default=[],
+        help="议程项；可重复使用，也可用逗号分隔",
+    )
+    parser.add_argument(
+        "--meeting-focus",
+        action="append",
+        default=[],
+        help="需要模型重点关注的事项；可重复使用",
+    )
+    parser.add_argument(
+        "--meeting-constraint",
+        action="append",
+        default=[],
+        help="不得违反的事实或表达约束；可重复使用",
+    )
+    parser.add_argument(
+        "--meeting-material",
+        type=Path,
+        action="append",
+        default=[],
+        help="会前资料（PDF/PPTX/DOCX/TXT/MD）；可重复使用",
+    )
+    parser.add_argument(
+        "--meeting-tone",
+        choices=("formal", "natural", "concise"),
+        default="natural",
+        help="建议语气，默认 natural",
+    )
+    parser.add_argument(
+        "--meeting-coach-level",
+        choices=("manual", "conservative", "active"),
+        default="conservative",
+        help="自动提醒强度；manual 只响应按键，默认 conservative",
     )
     parser.add_argument(
         "--assistant-interval",
@@ -210,13 +262,61 @@ def _load_meeting_preset(args) -> str:
         try:
             return args.meeting_preset_file.expanduser().read_text(encoding="utf-8").strip()
         except OSError as exc:
-            raise SystemExit(f"无法读取会议预设文件：{exc}") from exc
+            raise SystemExit(
+                f"无法读取会议预设文件 {args.meeting_preset_file.name}"
+                f"（{type(exc).__name__}）。"
+            ) from exc
     if args.meeting_preset:
         return args.meeting_preset.strip()
     return os.environ.get(
         "AUDIORESCUE_MEETING_PRESET",
         "普通工作会议。我的目标是准确理解问题，并给出简洁、自然、可直接说出口的回答。",
     ).strip()
+
+
+def _split_meeting_values(values) -> tuple[str, ...]:
+    items: list[str] = []
+    for value in values or ():
+        normalized = str(value).replace("，", ",").replace("；", ",").replace(";", ",")
+        items.extend(part.strip() for part in normalized.split(",") if part.strip())
+    return tuple(items)
+
+
+def _build_meeting_config(args) -> MeetingPreset:
+    return MeetingPreset(
+        title=args.meeting_name.strip() or "未命名会议",
+        scenario=args.meeting_scenario,
+        user_role=args.meeting_role.strip(),
+        audience=args.meeting_audience.strip(),
+        objective=args.meeting_objective.strip(),
+        agenda=_split_meeting_values(args.meeting_agenda),
+        focus_points=_split_meeting_values(args.meeting_focus),
+        constraints=_split_meeting_values(args.meeting_constraint),
+        custom_requirements=_load_meeting_preset(args),
+        tone=args.meeting_tone,
+        coach_level=args.meeting_coach_level,
+        language=args.asr_language,
+    )
+
+
+def _prepare_meeting_knowledge(args) -> MeetingKnowledgeBase:
+    knowledge_base = MeetingKnowledgeBase()
+    print(
+        "隐私提示：会议设置、最近转写和命中资料片段会发给阿里云千问；"
+        "不上传原始文件，但短资料可能大部分或全部进入命中片段。"
+    )
+    if not args.meeting_material:
+        return knowledge_base
+    try:
+        records = knowledge_base.ingest_files(args.meeting_material)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"会前资料解析失败：{exc}") from exc
+    print("会前资料已在本地建立检索索引：")
+    for record in records:
+        print(f"  - {record.display_name}（{record.chunk_count} 个文本片段）")
+        for warning in record.warnings:
+            print(f"    注意：{warning}")
+    return knowledge_base
 
 
 def _print_live_transcript(event: RealtimeAsrEvent) -> None:
@@ -287,8 +387,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--mode quiet 不能与 --no-leveler 同时使用")
     meeting = None
     if args.meeting_assistant:
+        meeting_config = _build_meeting_config(args)
+        meeting_knowledge = _prepare_meeting_knowledge(args)
         meeting = LiveMeetingAssistant(
-            preset=_load_meeting_preset(args),
+            session_config=meeting_config,
+            knowledge_base=meeting_knowledge,
             suggestion_interval=args.assistant_interval,
             final_silence_ms=args.asr_final_silence_ms,
             language_hint=None if args.asr_language == "auto" else args.asr_language,
