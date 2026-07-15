@@ -1,3 +1,4 @@
+import importlib.util
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +14,9 @@ from core.live_denoise import (
     VoiceLeveler,
     _OutputPair,
 )
+
+
+SOXR_AVAILABLE = importlib.util.find_spec("soxr") is not None
 
 
 class _DelayedGainDenoiser:
@@ -244,6 +248,7 @@ class LiveDenoiseEngineTest(unittest.TestCase):
 
         np.testing.assert_allclose(output, 0.04, atol=1e-6)
 
+    @unittest.skipUnless(SOXR_AVAILABLE, "soxr is required for 48 kHz live resampling")
     def test_quiet_mode_processes_48k_raw_blocks_without_resampling(self) -> None:
         quiet_processor = _RecordingGainProcessor(4.0)
         denoiser = _DelayedDownsamplingDenoiser(gain=0.05)
@@ -393,6 +398,7 @@ class VoiceLevelerTest(unittest.TestCase):
         self.assertGreaterEqual(float(np.sqrt(np.mean(output**2))), 0.03)
 
 
+@unittest.skipUnless(SOXR_AVAILABLE, "soxr is required for 48 kHz live resampling")
 class StreamingOutputResamplerTest(unittest.TestCase):
     def test_16k_blocks_become_exact_48k_blocks_without_drift(self) -> None:
         resampler = StreamingOutputResampler(16_000, 48_000)
