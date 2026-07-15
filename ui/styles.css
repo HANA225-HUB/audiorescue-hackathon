@@ -104,6 +104,21 @@ body,
   padding: 10px !important;
 }
 
+.gradio-container .ar-panel h1,
+.gradio-container .ar-panel h2,
+.gradio-container .ar-panel h3,
+.gradio-container .ar-panel h4,
+.gradio-container .ar-panel p,
+.gradio-container .ar-panel li,
+.gradio-container .ar-panel dt,
+.gradio-container .ar-panel dd,
+.gradio-container .ar-panel th,
+.gradio-container .ar-panel td,
+.gradio-container .ar-panel summary,
+.gradio-container .ar-panel code {
+  color: var(--ar-ink) !important;
+}
+
 .ar-upload-panel,
 .ar-settings-panel {
   box-shadow: var(--ar-shadow);
@@ -144,6 +159,14 @@ body,
   border-radius: 8px;
   padding: 8px 12px !important;
   margin-top: 8px !important;
+}
+
+.gradio-container .ar-process-note,
+.gradio-container .ar-process-note .prose,
+.gradio-container .ar-process-note .md,
+.gradio-container .ar-process-note .markdown,
+.gradio-container .ar-process-note p {
+  color: var(--ar-muted) !important;
 }
 
 .ar-engineering {
@@ -216,7 +239,6 @@ button.primary:hover {
 
 .ar-status-card h2 {
   margin: 4px 0 0 !important;
-  color: inherit;
 }
 
 .ar-status-header {
@@ -256,14 +278,14 @@ button.primary:hover {
 }
 
 .ar-status-facts dt {
-  color: var(--ar-muted);
+  color: var(--ar-muted) !important;
   font-size: 13px;
   font-weight: 700;
   margin: 0 0 3px;
 }
 
 .ar-status-facts dd {
-  color: var(--ar-ink);
+  color: var(--ar-ink) !important;
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -271,7 +293,7 @@ button.primary:hover {
 .ar-status-success {
   background: var(--ar-status-success-bg);
   border-left-color: var(--ar-status-success-line);
-  color: var(--ar-status-success-text);
+  color: var(--ar-status-success-text) !important;
 }
 
 .ar-status-success .ar-status-machine {
@@ -279,10 +301,14 @@ button.primary:hover {
   color: var(--ar-status-success-bg);
 }
 
+.gradio-container .ar-status-panel .ar-status-success h2 {
+  color: var(--ar-status-success-text) !important;
+}
+
 .ar-status-partial {
   background: var(--ar-status-partial-bg);
   border-left-color: var(--ar-status-partial-line);
-  color: var(--ar-status-partial-text);
+  color: var(--ar-status-partial-text) !important;
 }
 
 .ar-status-partial .ar-status-machine {
@@ -290,15 +316,23 @@ button.primary:hover {
   color: var(--ar-status-partial-bg);
 }
 
+.gradio-container .ar-status-panel .ar-status-partial h2 {
+  color: var(--ar-status-partial-text) !important;
+}
+
 .ar-status-failed {
   background: var(--ar-status-failed-bg);
   border-left-color: var(--ar-status-failed-line);
-  color: var(--ar-status-failed-text);
+  color: var(--ar-status-failed-text) !important;
 }
 
 .ar-status-failed .ar-status-machine {
   background: var(--ar-status-failed-text);
   color: var(--ar-status-failed-bg);
+}
+
+.gradio-container .ar-status-panel .ar-status-failed h2 {
+  color: var(--ar-status-failed-text) !important;
 }
 
 .ar-meta-panel,
@@ -322,6 +356,12 @@ button.primary:hover {
 .ar-download label {
   color: var(--ar-ink) !important;
   font-weight: 700 !important;
+}
+
+.gradio-container .ar-audio h3,
+.gradio-container .ar-visual h3,
+.gradio-container .ar-download h3 {
+  color: var(--ar-ink) !important;
 }
 
 .ar-transcript {
@@ -407,7 +447,7 @@ button.primary:hover {
 
 .ar-runtime-panel td:last-child {
   text-align: right;
-  color: var(--ar-muted);
+  color: var(--ar-muted) !important;
 }
 
 .warning-list {
@@ -429,11 +469,11 @@ button.primary:hover {
 }
 
 .warning-item strong {
-  color: var(--ar-yellow);
+  color: var(--ar-yellow) !important;
 }
 
 .warning-item em {
-  color: var(--ar-muted);
+  color: var(--ar-muted) !important;
   font-size: 0.9em;
   font-style: normal;
   margin-top: 4px;

@@ -339,6 +339,8 @@ def build_demo():
             _run,
             inputs=[use_fixture, fixture, input_file, strength, reference_text, force_recompute],
             outputs=outputs,
+            scroll_to_output=True,
+            show_progress="full",
         )
 
         if default_fixture and fixture_enabled:
