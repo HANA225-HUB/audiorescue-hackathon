@@ -262,8 +262,8 @@ gradio-app main {
   text-shadow: 0 12px 36px rgba(96, 62, 33, 0.18);
   transform:
     perspective(900px)
-    rotateX(calc(var(--ar-tilt-y) * -0.55))
-    rotateY(calc(var(--ar-tilt-x) * 0.55))
+    rotateX(calc(var(--ar-tilt-y) * -0.85))
+    rotateY(calc(var(--ar-tilt-x) * 0.85))
     translateZ(0);
   transform-style: preserve-3d;
   transition: transform 120ms ease-out;
@@ -1987,4 +1987,361 @@ button.ar-feature-action-muted {
   color: #2b2118 !important;
   -webkit-text-fill-color: #2b2118 !important;
   opacity: 1 !important;
+}
+
+/* Remote-base meeting page polish: keep PR #14's feature split, apply the local compact warm layout. */
+.ar-meeting-page {
+  padding-top: 20px !important;
+}
+
+.ar-meeting-page .ar-meeting-inner {
+  min-height: auto !important;
+  justify-content: flex-start !important;
+  gap: 14px !important;
+}
+
+.ar-meeting-page .ar-back-button,
+.ar-meeting-page button.ar-back-button {
+  margin-bottom: 2px !important;
+}
+
+.ar-meeting-page .ar-meeting-heading {
+  width: 100% !important;
+  max-width: none !important;
+  padding: 18px 28px !important;
+}
+
+.ar-meeting-page .ar-meeting-heading h2 {
+  margin-bottom: 6px !important;
+  font-size: 31px !important;
+}
+
+.ar-meeting-page .ar-meeting-heading p {
+  margin-bottom: 0 !important;
+  line-height: 1.65 !important;
+}
+
+.ar-meeting-page .ar-meeting-grid {
+  align-items: flex-start !important;
+  gap: 12px !important;
+}
+
+.ar-meeting-page .ar-meeting-panel {
+  align-self: flex-start !important;
+  min-height: 0 !important;
+  min-width: 0 !important;
+  height: auto !important;
+  padding: 16px !important;
+  gap: 10px !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel {
+  flex: 0 1 34% !important;
+}
+
+.ar-meeting-page .ar-meeting-transcript-panel {
+  flex: 0 1 64% !important;
+  gap: 8px !important;
+}
+
+.ar-meeting-page .ar-meeting-panel-title {
+  margin: 0 0 8px !important;
+}
+
+.ar-meeting-page .ar-meeting-panel-title h3 {
+  font-size: 20px !important;
+  line-height: 1.35 !important;
+}
+
+.ar-meeting-page .ar-meeting-input,
+.ar-meeting-page .ar-meeting-preset,
+.ar-meeting-page .ar-meeting-mode {
+  margin: 0 0 8px !important;
+  padding: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-input label,
+.ar-meeting-page .ar-meeting-preset label,
+.ar-meeting-page .ar-meeting-mode > label {
+  margin-bottom: 5px !important;
+  font-size: 15px !important;
+  line-height: 1.28 !important;
+}
+
+.ar-meeting-page .ar-meeting-input input,
+.ar-meeting-page .ar-meeting-input select,
+.ar-meeting-page .ar-meeting-input button {
+  min-height: 38px !important;
+  height: 38px !important;
+  padding: 6px 12px !important;
+  border-radius: 7px !important;
+  font-size: 14px !important;
+  line-height: 1.35 !important;
+}
+
+.ar-meeting-page .ar-meeting-input textarea,
+.ar-meeting-page .ar-meeting-preset textarea {
+  min-height: 72px !important;
+  padding: 9px 12px !important;
+  border-radius: 7px !important;
+  font-size: 14px !important;
+  line-height: 1.45 !important;
+}
+
+.ar-meeting-page .ar-meeting-input textarea[rows="1"] {
+  min-height: 38px !important;
+  height: 38px !important;
+  overflow: hidden !important;
+  resize: none !important;
+  padding: 7px 12px !important;
+}
+
+.ar-meeting-page .ar-meeting-input textarea[rows="2"] {
+  min-height: 58px !important;
+}
+
+.ar-meeting-page .ar-meeting-input textarea[rows="3"] {
+  min-height: 70px !important;
+}
+
+.ar-meeting-page .ar-meeting-input textarea[rows="4"] {
+  min-height: 82px !important;
+}
+
+.ar-meeting-page .ar-meeting-transcript-panel .ar-meeting-preset-row,
+.ar-meeting-page .ar-meeting-transcript-panel .ar-meeting-preset-row .form,
+.ar-meeting-page .ar-meeting-transcript-panel .ar-meeting-preset-row .wrap {
+  gap: 10px !important;
+  margin: 0 0 8px !important;
+  padding: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-transcript-panel .ar-meeting-preset-row .ar-meeting-input {
+  margin-bottom: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-button-row {
+  gap: 10px !important;
+  margin-top: 8px !important;
+}
+
+.ar-meeting-page .ar-meeting-meter {
+  padding: 10px 12px !important;
+  font-size: 13px !important;
+  line-height: 1.6 !important;
+}
+
+.ar-meeting-page .ar-meeting-meter code,
+.ar-meeting-page .ar-meeting-meter code * {
+  border-color: rgba(139, 99, 60, 0.22) !important;
+  background: rgba(255, 248, 236, 0.68) !important;
+  color: #2b2118 !important;
+  -webkit-text-fill-color: #2b2118 !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel .ar-meeting-mode .wrap {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 8px !important;
+  padding: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel .ar-meeting-mode label {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  justify-content: center !important;
+  gap: 5px !important;
+  padding: 8px 6px !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  font-size: 12px !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel .ar-meeting-mode label input {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel .ar-meeting-mode label::before {
+  width: 8px !important;
+  height: 8px !important;
+}
+
+.ar-meeting-page .ar-meeting-control-panel .ar-meeting-mode label span {
+  display: block !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  font-size: 12px !important;
+}
+
+.ar-meeting-page .ar-meeting-materials {
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  margin: 0 0 10px !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > label.float {
+  position: static !important;
+  display: flex !important;
+  align-items: center !important;
+  width: auto !important;
+  height: auto !important;
+  margin: 0 0 5px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  color: rgba(66, 48, 35, 0.78) !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+  font-weight: 600 !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > label.float span {
+  margin-right: 5px !important;
+  opacity: 0.72;
+}
+
+.ar-meeting-page .ar-meeting-materials > label.float svg {
+  width: 12px !important;
+  height: 12px !important;
+  stroke-width: 1.7 !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > button {
+  min-height: 72px !important;
+  height: 72px !important;
+  width: 100% !important;
+  padding: 10px 14px !important;
+  border: 1px dashed rgba(133, 88, 48, 0.42) !important;
+  border-radius: 8px !important;
+  background:
+    linear-gradient(145deg, rgba(255, 249, 238, 0.6), rgba(240, 207, 165, 0.38)) !important;
+  color: #4d3928 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    0 8px 18px rgba(101, 69, 40, 0.05) !important;
+  overflow: hidden !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > button:hover {
+  border-color: rgba(133, 88, 48, 0.58) !important;
+  background:
+    linear-gradient(145deg, rgba(255, 250, 242, 0.74), rgba(236, 196, 141, 0.48)) !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > button .wrap {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 3px !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: center !important;
+  font-size: 14px !important;
+  line-height: 1.35 !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > button .icon-wrap {
+  height: 18px !important;
+  margin: 0 !important;
+  opacity: 0.72;
+}
+
+.ar-meeting-page .ar-meeting-materials > button .icon-wrap svg {
+  width: 18px !important;
+  height: 18px !important;
+  stroke-width: 1.8 !important;
+}
+
+.ar-meeting-page .ar-meeting-materials > button .or {
+  display: none !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-note,
+.ar-meeting-page .prose.ar-meeting-privacy-note,
+.ar-meeting-page .ar-meeting-privacy-note .wrap,
+.ar-meeting-page .ar-meeting-privacy-note .prose,
+.ar-meeting-page .ar-meeting-privacy-note .markdown,
+.ar-meeting-page .ar-meeting-privacy-note .html-container {
+  border: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-note {
+  margin: 0 0 8px !important;
+  padding: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  color: rgba(66, 48, 35, 0.78) !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-note > *,
+.ar-meeting-page .ar-meeting-privacy-note .html-container {
+  margin: 0 !important;
+  padding: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-details {
+  border: 1px solid rgba(139, 99, 60, 0.14) !important;
+  border-radius: 7px !important;
+  background:
+    linear-gradient(145deg, rgba(255, 251, 244, 0.42), rgba(238, 203, 159, 0.2)) !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-details summary {
+  min-height: 30px !important;
+  display: flex !important;
+  align-items: center !important;
+  padding: 6px 10px !important;
+  cursor: pointer !important;
+  color: rgba(66, 48, 35, 0.78) !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+  font-weight: 600 !important;
+  list-style-position: inside !important;
+}
+
+.ar-meeting-page .ar-meeting-privacy-details p {
+  margin: 0 !important;
+  padding: 0 10px 8px 24px !important;
+  color: rgba(66, 48, 35, 0.72) !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  font-weight: 500 !important;
+}
+
+@media (max-width: 900px) {
+  .ar-meeting-page {
+    padding-top: 18px !important;
+  }
+
+  .ar-meeting-page .ar-meeting-heading {
+    padding: 18px 20px !important;
+  }
+
+  .ar-meeting-page .ar-meeting-grid {
+    gap: 12px !important;
+  }
+
+  .ar-meeting-page .ar-meeting-panel {
+    width: 100% !important;
+  }
 }

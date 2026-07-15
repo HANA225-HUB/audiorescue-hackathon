@@ -940,17 +940,20 @@ def build_demo():
                             file_types=[".pdf", ".pptx", ".docx", ".txt", ".md"],
                             elem_classes=["ar-meeting-input", "ar-meeting-materials"],
                         )
-                        gr.Markdown(
-                            "增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；"
+                        gr.HTML(
+                            "<details class='ar-meeting-privacy-details'>"
+                            "<summary>提示：资料本地解析；建议会使用最近转写和命中片段。</summary>"
+                            "<p>增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；"
                             "生成建议时会把会议设置、最近转写、资料形成的会前结构化概览"
                             "和命中的资料文字片段发给千问。"
                             "资料在本地解析和检索，不上传原始 PDF/PPT/DOCX 文件；"
-                            "短文档可能大部分进入命中片段；扫描 PDF 和 PPT 图片暂不 OCR。",
+                            "短文档可能大部分进入命中片段；扫描 PDF 和 PPT 图片暂不 OCR。</p>"
+                            "</details>",
                             elem_classes=["ar-meeting-privacy-note"],
                         )
                         with gr.Row(elem_classes=["ar-meeting-button-row"]):
                             start_meeting = gr.Button(
-                                "开始新会议（同时启动音频）",
+                                "开始新会议",
                                 variant="primary",
                                 elem_classes=["ar-meeting-action"],
                             )

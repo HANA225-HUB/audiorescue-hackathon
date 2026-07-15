@@ -382,7 +382,7 @@ class LayoutSafetyTest(unittest.TestCase):
             "后音频降噪增强处理",
             "实时会议输入",
             "开始急救",
-            "开始新会议（同时启动音频）",
+            "开始新会议",
         ):
             self.assertIn(expected, button_texts)
         for removed in (
@@ -402,15 +402,15 @@ class LayoutSafetyTest(unittest.TestCase):
         ):
             self.assertIn(expected_label, labels)
         self.assertNotIn("对方刚刚问了什么？", labels)
-        markdown_text = "\n".join(
+        page_text = "\n".join(
             str(args[0])
             for kind, args, _ in calls
-            if kind == "Markdown" and args
+            if kind in {"Markdown", "HTML"} and args
         )
-        self.assertIn("设备与实时引擎", markdown_text)
-        self.assertIn("会前预设与参考资料", markdown_text)
-        self.assertIn("资料在本地解析和检索", markdown_text)
-        self.assertIn("扫描 PDF 和 PPT 图片暂不 OCR", markdown_text)
+        self.assertIn("设备与实时引擎", page_text)
+        self.assertIn("会前预设与参考资料", page_text)
+        self.assertIn("资料在本地解析和检索", page_text)
+        self.assertIn("扫描 PDF 和 PPT 图片暂不 OCR", page_text)
         for removed in (
             "### 音频引擎",
             "### 会议助手",
@@ -420,7 +420,7 @@ class LayoutSafetyTest(unittest.TestCase):
             "#### 实时未定稿字幕",
             "#### 正式字幕记录",
         ):
-            self.assertNotIn(removed, markdown_text)
+            self.assertNotIn(removed, page_text)
         elem_classes = [
             class_name
             for _, _, kwargs in calls
