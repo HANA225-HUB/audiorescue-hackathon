@@ -11,3 +11,7 @@ jiwer>=3,<5
 pydantic>=2,<3
 PyYAML>=6,<7
 opencc-python-reimplemented==0.1.7
+sherpa-onnx==1.13.4
+sounddevice==0.5.5
+soxr==1.1.0
+websocket-client==1.9.0
