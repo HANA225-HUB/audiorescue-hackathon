@@ -19,6 +19,7 @@ from ui.file_delivery import (
     lookup_delivery_entry,
     register_file_for_delivery,
     register_files_for_delivery,
+    validate_registered_delivery_url,
 )
 from ui.file_staging import cleanup_stale_staging
 
@@ -397,6 +398,24 @@ class FileDeliveryTests(unittest.TestCase):
             replaced.unlink()
             os.replace(replacement, replaced)
             self.assertEqual(run(_request(str(replaced_url)))[0]["status"], 410)
+
+    def test_registered_url_recheck_helper_uses_identity_digest_and_unregisters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "mixed.wav"
+            _write_pcm_wav(source, b"\x01\x00\x02\x00")
+            url = register_file_for_delivery(source, filename="mixed.wav", allowed_roots=(root,))
+            self.assertIsNotNone(url)
+            self.assertTrue(validate_registered_delivery_url(str(url)))
+            entry = lookup_delivery_entry(str(url))
+            self.assertIsNotNone(entry)
+            assert entry is not None
+
+            _write_pcm_wav(source, b"\x03\x00\x04\x00")
+            os.utime(source, ns=(entry.mtime_ns, entry.mtime_ns))
+
+            self.assertFalse(validate_registered_delivery_url(str(url)))
+            self.assertIsNone(lookup_delivery_entry(str(url)))
 
     def test_staging_cleanup_invalidates_delivery_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

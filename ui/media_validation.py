@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import os
 import struct
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,8 @@ _WAV_FRAME_SIZE = 2
 _MAX_WAV_HEADER_BYTES = 4096
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _MAX_PNG_DIMENSION = 16384
+_MAX_PNG_PIXELS = 8 * 1024 * 1024
+_MAX_PNG_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,8 @@ def _validate_wav(data: bytes) -> bool:
                 return False
             fmt_payload = payload
         elif chunk_id == b"data":
+            if fmt_payload is None or not _valid_wav_fmt(fmt_payload):
+                return False
             if payload_start > _MAX_WAV_HEADER_BYTES:
                 return False
             if chunk_size == 0 or chunk_size % _WAV_FRAME_SIZE != 0:
@@ -165,6 +170,10 @@ def _validate_wav(data: bytes) -> bool:
     if position != len(data) or fmt_payload is None or data_payload_size is None:
         return False
 
+    return _valid_wav_fmt(fmt_payload)
+
+
+def _valid_wav_fmt(fmt_payload: bytes) -> bool:
     audio_format = _u16_le(fmt_payload, 0)
     channels = _u16_le(fmt_payload, 2)
     sample_rate = _u32_le(fmt_payload, 4)
@@ -188,14 +197,19 @@ def _validate_png(data: bytes) -> bool:
         return False
 
     position = len(_PNG_SIGNATURE)
-    seen_ihdr = False
+    ihdr: dict[str, int] | None = None
+    seen_plte = False
     seen_idat = False
+    idat_finished = False
     seen_iend = False
+    idat_payloads: list[bytes] = []
     while position < len(data):
         if seen_iend or position + 12 > len(data):
             return False
         length = _u32_be(data, position)
         chunk_type = data[position + 4 : position + 8]
+        if not _valid_png_chunk_type(chunk_type):
+            return False
         payload_start = position + 8
         payload_end = payload_start + length
         crc_end = payload_end + 4
@@ -208,27 +222,53 @@ def _validate_png(data: bytes) -> bool:
             return False
 
         if chunk_type == b"IHDR":
-            if seen_ihdr or position != len(_PNG_SIGNATURE) or length != 13:
+            if ihdr is not None or position != len(_PNG_SIGNATURE) or length != 13:
                 return False
-            if not _valid_ihdr(payload):
+            ihdr = _png_ihdr(payload)
+            if ihdr is None:
                 return False
-            seen_ihdr = True
+        elif chunk_type == b"PLTE":
+            if ihdr is None or seen_plte or seen_idat or not _valid_plte(payload, ihdr):
+                return False
+            seen_plte = True
         elif chunk_type == b"IDAT":
-            if not seen_ihdr or seen_iend or length == 0:
+            if ihdr is None or seen_iend or idat_finished or length == 0:
+                return False
+            if ihdr["color_type"] == 3 and not seen_plte:
                 return False
             seen_idat = True
+            idat_payloads.append(payload)
         elif chunk_type == b"IEND":
-            if length != 0 or not seen_ihdr or not seen_idat:
+            if length != 0 or ihdr is None or not seen_idat:
                 return False
             seen_iend = True
-        elif not seen_ihdr:
+        elif ihdr is None:
             return False
+        elif _is_critical_png_chunk(chunk_type):
+            return False
+        elif seen_idat:
+            idat_finished = True
         position = crc_end
 
-    return seen_iend and position == len(data)
+    return (
+        seen_iend
+        and position == len(data)
+        and ihdr is not None
+        and _valid_png_zlib_scanlines(idat_payloads, ihdr)
+    )
 
 
-def _valid_ihdr(payload: bytes) -> bool:
+def _valid_png_chunk_type(chunk_type: bytes) -> bool:
+    return len(chunk_type) == 4 and all(
+        (65 <= byte <= 90) or (97 <= byte <= 122) for byte in chunk_type
+    )
+
+
+def _is_critical_png_chunk(chunk_type: bytes) -> bool:
+    return not bool(chunk_type[0] & 0x20)
+
+
+def _png_ihdr(payload: bytes) -> dict[str, int] | None:
     width = _u32_be(payload, 0)
     height = _u32_be(payload, 4)
     bit_depth = payload[8]
@@ -236,8 +276,12 @@ def _valid_ihdr(payload: bytes) -> bool:
     compression = payload[10]
     filter_method = payload[11]
     interlace = payload[12]
-    if not (1 <= width <= _MAX_PNG_DIMENSION and 1 <= height <= _MAX_PNG_DIMENSION):
-        return False
+    pixels = width * height
+    if (
+        not (1 <= width <= _MAX_PNG_DIMENSION and 1 <= height <= _MAX_PNG_DIMENSION)
+        or pixels > _MAX_PNG_PIXELS
+    ):
+        return None
     valid_depths = {
         0: {1, 2, 4, 8, 16},
         2: {8, 16},
@@ -245,9 +289,63 @@ def _valid_ihdr(payload: bytes) -> bool:
         4: {8, 16},
         6: {8, 16},
     }
-    return (
+    if not (
         bit_depth in valid_depths.get(color_type, set())
         and compression == 0
         and filter_method == 0
-        and interlace in {0, 1}
-    )
+        and interlace == 0
+    ):
+        return None
+    channels_by_color = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+    bits_per_pixel = channels_by_color[color_type] * bit_depth
+    row_bytes = (width * bits_per_pixel + 7) // 8
+    decompressed_bytes = height * (row_bytes + 1)
+    if decompressed_bytes <= 0 or decompressed_bytes > _MAX_PNG_DECOMPRESSED_BYTES:
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "bit_depth": bit_depth,
+        "color_type": color_type,
+        "row_bytes": row_bytes,
+        "decompressed_bytes": decompressed_bytes,
+    }
+
+
+def _valid_plte(payload: bytes, ihdr: dict[str, int]) -> bool:
+    if len(payload) == 0 or len(payload) % 3 != 0 or len(payload) > 256 * 3:
+        return False
+    color_type = ihdr["color_type"]
+    if color_type in {0, 4}:
+        return False
+    if color_type == 3:
+        entries = len(payload) // 3
+        return entries <= 2 ** ihdr["bit_depth"]
+    return True
+
+
+def _valid_png_zlib_scanlines(idat_payloads: list[bytes], ihdr: dict[str, int]) -> bool:
+    compressed = b"".join(idat_payloads)
+    if not compressed:
+        return False
+    expected = ihdr["decompressed_bytes"]
+    try:
+        decompressor = zlib.decompressobj()
+        decoded = decompressor.decompress(compressed, expected + 1)
+        if len(decoded) > expected:
+            return False
+        decoded += decompressor.flush(expected + 1 - len(decoded))
+    except zlib.error:
+        return False
+    if (
+        not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+        or len(decoded) != expected
+    ):
+        return False
+    row_stride = ihdr["row_bytes"] + 1
+    for offset in range(0, len(decoded), row_stride):
+        if decoded[offset] > 4:
+            return False
+    return True

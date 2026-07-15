@@ -47,15 +47,30 @@ def _png_bytes(
     *,
     width: int = 1,
     height: int = 1,
+    bit_depth: int = 8,
+    color_type: int = 6,
+    interlace: int = 0,
+    idat_payload: bytes | None = None,
+    raw_scanlines: bytes | None = None,
+    include_plte: bool = False,
+    plte_payload: bytes = b"\x00\x00\x00",
+    extra_chunks: list[tuple[bytes, bytes]] | None = None,
     include_idat: bool = True,
     include_iend: bool = True,
     crc_delta: int = 0,
 ) -> bytes:
     signature = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    ihdr = struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, interlace)
     chunks = [_png_chunk(b"IHDR", ihdr, crc_delta=crc_delta)]
+    if include_plte:
+        chunks.append(_png_chunk(b"PLTE", plte_payload))
+    for kind, payload in extra_chunks or []:
+        chunks.append(_png_chunk(kind, payload))
     if include_idat:
-        chunks.append(_png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00")))
+        if idat_payload is None:
+            scanlines = b"\x00\x00\x00\x00\x00" if raw_scanlines is None else raw_scanlines
+            idat_payload = zlib.compress(scanlines)
+        chunks.append(_png_chunk(b"IDAT", idat_payload))
     if include_iend:
         chunks.append(_png_chunk(b"IEND", b""))
     return signature + b"".join(chunks)
@@ -89,6 +104,15 @@ class MediaValidationTests(unittest.TestCase):
                     _chunk(b"data", b"\x00\x00"),
                 ]
             ),
+            "data_before_fmt": _wav_bytes(
+                chunks=[
+                    _chunk(b"data", b"\x00\x00"),
+                    _chunk(
+                        b"fmt ",
+                        struct.pack("<HHIIHH", 1, 1, 48000, 96000, 2, 16),
+                    ),
+                ]
+            ),
             "overrun_chunk": b"RIFF\x14\x00\x00\x00WAVEdata\xff\x00\x00\x00\x00\x00",
             "trailing_garbage": _wav_bytes() + b"junk",
             "oversized_header": _wav_bytes(
@@ -119,6 +143,24 @@ class MediaValidationTests(unittest.TestCase):
             "no_idat": _png_bytes(include_idat=False),
             "no_iend": _png_bytes(include_iend=False),
             "trailing_garbage": valid + b"x",
+            "non_zlib_idat": _png_bytes(idat_payload=b"not zlib"),
+            "zlib_trailing": _png_bytes(idat_payload=zlib.compress(b"\x00\x00\x00\x00\x00") + b"x"),
+            "wrong_scanline_size": _png_bytes(raw_scanlines=b"\x00\x00"),
+            "bad_filter_byte": _png_bytes(raw_scanlines=b"\x05\x00\x00\x00\x00"),
+            "indexed_without_plte": _png_bytes(
+                color_type=3,
+                bit_depth=8,
+                raw_scanlines=b"\x00\x00",
+            ),
+            "indexed_plte_too_large": _png_bytes(
+                color_type=3,
+                bit_depth=1,
+                include_plte=True,
+                plte_payload=b"\x00\x00\x00" * 3,
+                raw_scanlines=b"\x00\x00",
+            ),
+            "unknown_critical_chunk": _png_bytes(extra_chunks=[(b"ABCD", b"")]),
+            "interlaced": _png_bytes(interlace=1),
         }
         for name, data in cases.items():
             with self.subTest(name=name):

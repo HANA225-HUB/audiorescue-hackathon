@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import binascii
+import os
 import re
 import struct
 import unittest
@@ -12,7 +13,11 @@ from unittest import mock
 from urllib.parse import quote, unquote
 
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
-from ui.file_delivery import clear_delivery_registry, lookup_delivery_entry
+from ui.file_delivery import (
+    clear_delivery_registry,
+    lookup_delivery_entry,
+    register_files_for_delivery as _register_files_for_delivery,
+)
 from ui.file_delivery import unregister_delivery_url as _unregister_delivery_url
 from ui.presenters import (
     UI_TUPLE_KEYS,
@@ -716,8 +721,26 @@ class PresenterTests(unittest.TestCase):
                 "runtime_nan": {**_valid_transcript("after"), "runtime_seconds": float("nan")},
                 "runtime_inf": {**_valid_transcript("after"), "runtime_seconds": float("inf")},
                 "runtime_bool": {**_valid_transcript("after"), "runtime_seconds": True},
+                "runtime_huge_int": {
+                    **_valid_transcript("after"),
+                    "runtime_seconds": 10**10000,
+                },
+                "top_level_extra": {**_valid_transcript("after"), "confidence": 0.9},
+                "top_level_missing_key": {
+                    key: value
+                    for key, value in _valid_transcript("after").items()
+                    if key != "language"
+                },
                 "segment_string": {**_valid_transcript("after"), "segments": [{**segment, "start": "0"}]},
                 "segment_negative": {**_valid_transcript("after"), "segments": [{**segment, "start": -0.1}]},
+                "segment_huge_start": {
+                    **_valid_transcript("after"),
+                    "segments": [{**segment, "start": 10**10000}],
+                },
+                "segment_huge_end": {
+                    **_valid_transcript("after"),
+                    "segments": [{**segment, "end": 10**10000}],
+                },
                 "segment_end_before_start": {
                     **_valid_transcript("after"),
                     "segments": [{**segment, "start": 0.2, "end": 0.1}],
@@ -744,6 +767,7 @@ class PresenterTests(unittest.TestCase):
                     view = result_to_view(result)
 
                 self.assertEqual(result["status"], "success")
+                self.assertIs(result["transcript_after"], transcript_after)
                 self.assertIs(result["warnings"], original_warnings)
                 self.assertEqual(result["warnings"], [])
                 self.assertIn("data-status='partial'", view["status_md"])
@@ -770,13 +794,9 @@ class PresenterTests(unittest.TestCase):
             )
 
             def fake_register_files(*args, **kwargs):
-                return {
-                    "original_audio": "/audiorescue-files/t/original.wav",
-                    "mixed_audio": "/audiorescue-files/t/mixed.wav",
-                    "full_audio": None,
-                    "spectrogram_image": None,
-                    "waveform_image": "/audiorescue-files/t/waveform.png",
-                }
+                urls = _register_files_for_delivery(*args, **kwargs)
+                urls["spectrogram_image"] = None
+                return urls
 
             with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
                 "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
@@ -838,6 +858,66 @@ class PresenterTests(unittest.TestCase):
         removed_url = unregister.call_args.args[0]
         self.assertTrue(str(removed_url).endswith("/waveform.png"))
         self.assertIsNone(lookup_delivery_entry(str(removed_url)))
+
+    def test_registered_audio_race_before_effective_url_downgrades_and_unregisters(self) -> None:
+        for mode in ("rewrite_same_metadata", "replace_legal_media"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+                root = Path(root_tmp)
+                staging_root = Path(stage_tmp) / "ui-stage"
+                job_root = root / "outputs" / "safe_job"
+                job_root.mkdir(parents=True)
+                original = job_root / "original.wav"
+                mixed = job_root / "mixed.wav"
+                _write_pcm_wav(original)
+                _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
+                spectrogram_path, waveform_path = _write_visual_pair(job_root)
+                result = _base_delivery_result(
+                    root,
+                    original_path=str(original),
+                    mixed_path=str(mixed),
+                    spectrogram_path=spectrogram_path,
+                    waveform_path=waveform_path,
+                )
+                tampered_urls: list[str] = []
+
+                def register_then_tamper(*args, **kwargs):
+                    urls = _register_files_for_delivery(*args, **kwargs)
+                    for role in ("original_audio", "mixed_audio"):
+                        url = urls.get(role)
+                        entry = lookup_delivery_entry(str(url)) if url else None
+                        if entry is None:
+                            continue
+                        tampered_urls.append(str(url))
+                        if mode == "rewrite_same_metadata":
+                            _write_pcm_wav(entry.path, b"\x10\x00\x11\x00")
+                            os.utime(entry.path, ns=(entry.mtime_ns, entry.mtime_ns))
+                        else:
+                            replacement = entry.path.with_name(f"{entry.path.stem}-replacement.wav")
+                            _write_pcm_wav(replacement, b"\x12\x00\x13\x00")
+                            os.replace(replacement, entry.path)
+                    return urls
+
+                with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                    "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+                ), mock.patch(
+                    "ui.presenters.register_files_for_delivery",
+                    side_effect=register_then_tamper,
+                ):
+                    view = result_to_view(result)
+
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(result["warnings"], [])
+                self.assertIn("data-status='failed'", view["status_md"])
+                self.assertIn("UI_WAV_INVALID", view["warnings_html"])
+                self.assertNotIn("<audio", view["original_audio"])
+                self.assertNotIn("<audio", view["enhanced_audio"])
+                self.assertNotIn("下载 mixed.wav", view["mixed_download"])
+                self.assertEqual(_delivery_urls(view["original_audio"]), [])
+                self.assertEqual(_delivery_urls(view["enhanced_audio"]), [])
+                self.assertEqual(_delivery_urls(view["mixed_download"]), [])
+                self.assertGreaterEqual(len(tampered_urls), 2)
+                for url in tampered_urls:
+                    self.assertIsNone(lookup_delivery_entry(url))
 
     def test_failed_core_status_is_never_upgraded_by_available_files(self) -> None:
         with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:

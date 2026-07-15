@@ -252,6 +252,28 @@ def lookup_delivery_entry(url_or_token: str) -> DeliveryEntry | None:
         return _REGISTRY.get(token)
 
 
+def validate_registered_delivery_url(url_or_token: str | None) -> bool:
+    """Recheck a registered URL/token against current file identity and bytes."""
+
+    if not url_or_token:
+        return False
+    token = url_or_token
+    expected_filename = None
+    if token.startswith(f"{DELIVERY_PREFIX}/"):
+        parts = token.split("/")
+        if len(parts) != 4:
+            return False
+        token = parts[2]
+        expected_filename = parts[3]
+    if not _OPAQUE_ID_RE.fullmatch(token):
+        return False
+    entry, _media, status = _validate_registered_entry(
+        token,
+        expected_filename=expected_filename,
+    )
+    return status == 200 and entry is not None
+
+
 def _response_headers(entry: DeliveryEntry, *, status_size: int) -> list[tuple[bytes, bytes]]:
     content_type = _NEUTRAL_CONTENT_TYPES.get(
         entry.path.suffix.lower(),
@@ -312,11 +334,11 @@ def _parse_request(scope: Mapping[str, Any]) -> tuple[str, str] | None:
     return token, filename
 
 
-def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, ValidatedMedia | None, int]:
-    parsed = _parse_request(scope)
-    if parsed is None:
-        return None, None, 404
-    token, filename = parsed
+def _validate_registered_entry(
+    token: str,
+    *,
+    expected_filename: str | None,
+) -> tuple[DeliveryEntry | None, ValidatedMedia | None, int]:
     timestamp = time.time()
     with _REGISTRY_LOCK:
         entry = _REGISTRY.get(token)
@@ -325,7 +347,7 @@ def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, Va
         if entry.expires_at <= timestamp:
             _REGISTRY.pop(token, None)
             return None, None, 410
-        if filename != entry.filename:
+        if expected_filename is not None and expected_filename != entry.filename:
             return None, None, 404
 
     path = entry.path
@@ -335,20 +357,24 @@ def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, Va
             _REGISTRY.pop(token, None)
         return None, None, 410
     try:
-        stat_result = os.fstat(fd)
-        kind = media_kind_for_name(entry.filename)
-        media = validate_and_hash_fd(fd, kind=kind)
-        invalid = (
-            media is None
-            or path.is_symlink()
-            or not path.is_file()
-            or stat_result.st_size != entry.size
-            or stat_result.st_mtime_ns != entry.mtime_ns
-            or stat_result.st_ino != entry.inode
-            or stat_result.st_dev != entry.device
-            or media.size != entry.size
-            or media.digest != entry.digest
-        )
+        try:
+            stat_result = os.fstat(fd)
+            kind = media_kind_for_name(entry.filename)
+            media = validate_and_hash_fd(fd, kind=kind)
+            invalid = (
+                media is None
+                or path.is_symlink()
+                or not path.is_file()
+                or stat_result.st_size != entry.size
+                or stat_result.st_mtime_ns != entry.mtime_ns
+                or stat_result.st_ino != entry.inode
+                or stat_result.st_dev != entry.device
+                or media.size != entry.size
+                or media.digest != entry.digest
+            )
+        except OSError:
+            media = None
+            invalid = True
     finally:
         os.close(fd)
     if invalid:
@@ -356,6 +382,14 @@ def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, Va
             _REGISTRY.pop(token, None)
         return None, None, 410
     return entry, media, 200
+
+
+def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, ValidatedMedia | None, int]:
+    parsed = _parse_request(scope)
+    if parsed is None:
+        return None, None, 404
+    token, filename = parsed
+    return _validate_registered_entry(token, expected_filename=filename)
 
 
 def _range_from_header(range_header: bytes | None, size: int) -> tuple[int, int, int] | None:

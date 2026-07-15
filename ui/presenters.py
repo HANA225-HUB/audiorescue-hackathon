@@ -15,7 +15,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .file_delivery import register_files_for_delivery, unregister_delivery_url
+from .file_delivery import (
+    register_files_for_delivery,
+    unregister_delivery_url,
+    validate_registered_delivery_url,
+)
 from .file_staging import (
     default_staging_root,
     resolve_allowed_file,
@@ -318,7 +322,7 @@ def _result_file_roots(result: dict[str, Any]) -> tuple[Path, ...]:
 def format_seconds(value: Any) -> str:
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "未记录"
     return f"{seconds:.2f} 秒"
 
@@ -328,7 +332,7 @@ def format_number(value: Any, digits: int = 2) -> str:
         return "未记录"
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "未记录"
     return f"{number:.{digits}f}"
 
@@ -338,7 +342,7 @@ def format_percent(value: Any) -> str:
         return "未记录"
     try:
         number = float(value) * 100
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "未记录"
     return f"{number:.1f}%"
 
@@ -795,7 +799,14 @@ def _effective_delivery_urls(
     for role, url in list(effective.items()):
         if not url:
             continue
-        if role in invalid_media_roles or not staged_files.get(role):
+        invalid = role in invalid_media_roles or not staged_files.get(role)
+        if not invalid:
+            try:
+                invalid = not validate_registered_delivery_url(url)
+            except Exception:
+                invalid = True
+        if invalid:
+            invalid_media_roles.add(role)
             unregister_delivery_url(url)
             effective[role] = None
     return effective
@@ -859,7 +870,10 @@ def _warning_list(value: Any) -> list[Any]:
 def _finite_non_negative_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if number != number or number in {float("inf"), float("-inf")} or number < 0:
         return None
     return number
@@ -881,6 +895,8 @@ def _transcript_segment_is_complete(segment: Any) -> bool:
 def _transcript_is_complete(value: Any) -> bool:
     data = as_dict(value)
     if not data:
+        return False
+    if set(data) != {"text", "language", "segments", "runtime_seconds", "model_name", "error"}:
         return False
     text = data.get("text")
     language = data.get("language")
