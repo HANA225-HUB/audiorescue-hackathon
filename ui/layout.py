@@ -241,7 +241,7 @@ OPEN_FLOATING_JS = """
   const opened = window.open(
     url,
     "audiorescue_meeting_floating",
-    "popup=yes,width=420,height=560,menubar=no,toolbar=no,location=no,status=no"
+    "popup=yes,width=440,height=720,menubar=no,toolbar=no,location=no,status=no"
   );
   if (opened && !opened.closed) {
     try {

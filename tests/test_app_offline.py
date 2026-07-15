@@ -1,4 +1,5 @@
 import tempfile
+import json
 import os
 import sys
 import types
@@ -30,6 +31,27 @@ def _write_pcm_wav(
 
 async def _receive():
     return {"type": "http.request", "body": b"", "more_body": False}
+
+
+def _receive_body(body: bytes):
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return receive
+
+
+def _receive_chunks(*chunks: bytes):
+    remaining = list(chunks)
+
+    async def receive():
+        chunk = remaining.pop(0)
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": bool(remaining),
+        }
+
+    return receive
 
 
 async def _collect(app, *, scope=None):
@@ -157,6 +179,199 @@ class OfflineMiddlewareTest(unittest.TestCase):
         self.assertIn("suggestion-meta", body)
         self.assertIn("state.suggestion_kind", body)
         self.assertIn("state.confidence", body)
+        self.assertIn("对方刚刚说了什么？", body)
+        self.assertIn("立即生成下一段建议", body)
+        self.assertIn("根据会议资料生成回答", body)
+        self.assertIn("/audiorescue/live/action", body)
+        self.assertIn('runAction("next_line")', body)
+        self.assertIn('runAction("answer")', body)
+        self.assertIn("actionInFlight", body)
+        self.assertIn("response.ok", body)
+        self.assertIn('aria-live="polite"', body)
+        self.assertNotIn('questionInput.value = ""', body)
+
+    def test_live_action_route_requests_next_section(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            raise AssertionError("action route must not reach wrapped app")
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        snapshot = types.SimpleNamespace(last_action="已请求下一句建议。")
+        with mock.patch(
+            "app.LIVE_CONTROLLER.request_next_line", return_value=snapshot
+        ) as request_next, mock.patch(
+            "app.snapshot_to_dict", return_value={"meeting_status": "listening"}
+        ):
+            run(
+                LiveStateMiddleware(passthrough_app)(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": "/audiorescue/live/action",
+                        "headers": [(b"content-type", b"application/json")],
+                    },
+                    _receive_body(
+                        json.dumps({"action": "next_line"}).encode("utf-8")
+                    ),
+                    send,
+                )
+            )
+
+        payload = json.loads(sent[-1]["body"].decode("utf-8"))
+        self.assertEqual(sent[0]["status"], 200)
+        self.assertEqual(payload["last_action"], "已请求下一句建议。")
+        self.assertEqual(payload["state"]["meeting_status"], "listening")
+        request_next.assert_called_once_with()
+
+    def test_live_action_route_submits_remote_question(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            raise AssertionError("action route must not reach wrapped app")
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        snapshot = types.SimpleNamespace(last_action="已提交对方问题。")
+        with mock.patch(
+            "app.LIVE_CONTROLLER.request_answer", return_value=snapshot
+        ) as request_answer, mock.patch(
+            "app.snapshot_to_dict", return_value={"suggestion": ""}
+        ):
+            run(
+                LiveStateMiddleware(passthrough_app)(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": "/audiorescue/live/action",
+                        "headers": [
+                            (b"content-type", b"application/json; charset=utf-8")
+                        ],
+                    },
+                    _receive_chunks(
+                        json.dumps(
+                            {
+                                "action": "answer",
+                                "question": "你们的项目限制是什么？",
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")[:20],
+                        json.dumps(
+                            {
+                                "action": "answer",
+                                "question": "你们的项目限制是什么？",
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")[20:],
+                    ),
+                    send,
+                )
+            )
+
+        self.assertEqual(sent[0]["status"], 200)
+        request_answer.assert_called_once_with("你们的项目限制是什么？")
+
+    def test_live_action_route_rejects_invalid_requests(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            raise AssertionError("action route must not reach wrapped app")
+
+        cases = (
+            (
+                "GET",
+                [(b"content-type", b"application/json")],
+                b"{}",
+                405,
+            ),
+            ("POST", [(b"content-type", b"text/plain")], b"{}", 415),
+            (
+                "POST",
+                [(b"content-type", b"application/json")],
+                b"not-json",
+                400,
+            ),
+            (
+                "POST",
+                [(b"content-type", b"application/json")],
+                json.dumps({"action": "answer", "question": ""}).encode("utf-8"),
+                400,
+            ),
+            (
+                "POST",
+                [(b"content-type", b"application/json")],
+                json.dumps({"action": "answer", "question": ["不是文本"]}).encode(
+                    "utf-8"
+                ),
+                400,
+            ),
+            (
+                "POST",
+                [(b"content-type", b"application/json")],
+                b"x" * 16_385,
+                413,
+            ),
+        )
+        for method, headers, body, expected_status in cases:
+            with self.subTest(method=method, body=body):
+                sent = []
+
+                async def send(message):
+                    sent.append(message)
+
+                run(
+                    LiveStateMiddleware(passthrough_app)(
+                        {
+                            "type": "http",
+                            "method": method,
+                            "path": "/audiorescue/live/action",
+                            "headers": headers,
+                        },
+                        _receive_body(body),
+                        send,
+                    )
+                )
+                self.assertEqual(sent[0]["status"], expected_status)
+                self.assertIn("error", json.loads(sent[-1]["body"].decode("utf-8")))
+                if expected_status == 405:
+                    self.assertEqual(dict(sent[0]["headers"])[b"allow"], b"POST")
+
+    def test_live_action_route_hides_unexpected_controller_errors(self) -> None:
+        async def passthrough_app(scope, receive, send):
+            raise AssertionError("action route must not reach wrapped app")
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        with mock.patch(
+            "app.LIVE_CONTROLLER.request_next_line",
+            side_effect=RuntimeError(
+                "SECRET_MARKER /private/audio/meeting.wav"
+            ),
+        ), mock.patch("app.LIVE_CONTROLLER.record_ui_error") as record_error:
+            run(
+                LiveStateMiddleware(passthrough_app)(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": "/audiorescue/live/action",
+                        "headers": [(b"content-type", b"application/json")],
+                    },
+                    _receive_body(
+                        json.dumps({"action": "next_line"}).encode("utf-8")
+                    ),
+                    send,
+                )
+            )
+
+        body = sent[-1]["body"].decode("utf-8")
+        self.assertEqual(sent[0]["status"], 500)
+        self.assertNotIn("SECRET_MARKER", body)
+        self.assertNotIn("/private/audio", body)
+        record_error.assert_called_once()
 
     def test_non_html_payloads_are_byte_preserved(self) -> None:
         cases = [
