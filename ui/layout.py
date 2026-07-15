@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,201 @@ from .presenters import (
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CSS_PATH = ROOT_DIR / "ui" / "styles.css"
+ASSET_DIR = ROOT_DIR / "ui" / "assets"
+BACKGROUND_ASSETS = {
+    "--ar-bg-intro": "intro-bg.webp",
+    "--ar-bg-feature": "feature-bg.webp",
+    "--ar-bg-audio": "audio-bg.webp",
+    "--ar-bg-meeting": "meeting-bg.webp",
+}
+APP_JS = """
+() => {
+  if (window.__audiorescueFlowReady) {
+    return;
+  }
+  window.__audiorescueFlowReady = true;
+
+  const root = document.documentElement;
+  let targetX = 50;
+  let targetY = 42;
+  let currentX = targetX;
+  let currentY = targetY;
+
+  const updateVars = () => {
+    currentX += (targetX - currentX) * 0.12;
+    currentY += (targetY - currentY) * 0.12;
+    const tiltX = ((currentX - 50) / 50) * 4;
+    const tiltY = ((50 - currentY) / 50) * 3;
+    root.style.setProperty("--ar-pointer-x", `${currentX.toFixed(2)}%`);
+    root.style.setProperty("--ar-pointer-y", `${currentY.toFixed(2)}%`);
+    root.style.setProperty("--ar-tilt-x", `${tiltX.toFixed(2)}deg`);
+    root.style.setProperty("--ar-tilt-y", `${tiltY.toFixed(2)}deg`);
+    window.requestAnimationFrame(updateVars);
+  };
+
+  window.addEventListener("pointermove", (event) => {
+    targetX = Math.max(0, Math.min(100, (event.clientX / window.innerWidth) * 100));
+    targetY = Math.max(0, Math.min(100, (event.clientY / window.innerHeight) * 100));
+    document.body.classList.add("ar-pointer-active");
+  }, { passive: true });
+
+  window.addEventListener("pointerdown", () => {
+    document.body.classList.add("ar-pointer-down");
+    window.setTimeout(() => document.body.classList.remove("ar-pointer-down"), 180);
+  }, { passive: true });
+
+  const initSpectrumCanvas = () => {
+    let page = null;
+    let canvas = null;
+    let ctx = null;
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+    const bands = [0.27, 0.38, 0.5, 0.62, 0.75];
+    const phases = bands.map((_, index) => index * 1.73);
+
+    const resize = () => {
+      if (!page || !canvas || !ctx) {
+        return;
+      }
+      const rect = page.getBoundingClientRect();
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.max(1, Math.floor(rect.width));
+      height = Math.max(1, Math.floor(rect.height));
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+
+    const ensureCanvas = () => {
+      const nextPage = document.querySelector(".ar-poster-page");
+      if (!nextPage) {
+        return false;
+      }
+
+      if (nextPage !== page || !canvas || !nextPage.contains(canvas)) {
+        page = nextPage;
+        canvas = page.querySelector("canvas.ar-spectrum-canvas");
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+          canvas.className = "ar-spectrum-canvas";
+          page.prepend(canvas);
+        }
+        ctx = canvas.getContext("2d");
+        resize();
+      }
+
+      return Boolean(ctx);
+    };
+
+    const drawWave = (time, band, index) => {
+      const baseY = height * band;
+      const verticalDistance = Math.abs(currentY - band * 100);
+      const verticalEnergy = Math.max(0, 1 - verticalDistance / 23);
+      const points = 96;
+      ctx.beginPath();
+      for (let i = 0; i <= points; i += 1) {
+        const ratio = i / points;
+        const x = ratio * width;
+        const horizontalDistance = Math.abs(currentX - ratio * 100);
+        const cursorEnergy = Math.max(0, 1 - Math.hypot(horizontalDistance / 32, verticalDistance / 23));
+        const localEnergy = 1 + verticalEnergy * 0.55 + cursorEnergy * 2.2;
+        const envelope = 0.35 + 0.65 * Math.sin(Math.PI * ratio);
+        const slow = Math.sin(time * (1.1 + index * 0.08) + ratio * Math.PI * (5.2 + index));
+        const fast = Math.sin(time * (2.4 + index * 0.18) + ratio * Math.PI * (13.5 + index * 0.8));
+        const jitter = Math.sin(time * (4.0 + index * 0.22) + ratio * Math.PI * 31) * cursorEnergy;
+        const amplitude = (10 + index * 2.3) * localEnergy;
+        const y = baseY + (slow * 0.72 + fast * 0.2 + jitter * 0.32) * amplitude * envelope;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      const warm = index % 2 === 0;
+      ctx.lineWidth = warm ? 2.2 : 1.8;
+      ctx.strokeStyle = warm
+        ? "rgba(181, 105, 47, 0.62)"
+        : "rgba(71, 143, 154, 0.48)";
+      ctx.shadowColor = warm ? "rgba(255, 177, 93, 0.28)" : "rgba(119, 211, 206, 0.24)";
+      ctx.shadowBlur = 14;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    };
+
+    const drawBars = (time) => {
+      const count = 34;
+      const baseY = height * 0.84;
+      const spacing = width / count;
+      for (let i = 0; i < count; i += 1) {
+        const ratio = (i + 0.5) / count;
+        const x = ratio * width;
+        const horizontalDistance = Math.abs(currentX - ratio * 100);
+        const cursorEnergy = Math.max(0, 1 - horizontalDistance / 18);
+        const pulse = Math.sin(time * 2.2 + i * 0.68) * 0.5 + 0.5;
+        const heightBoost = (22 + 54 * pulse) * (1 + cursorEnergy * 1.65);
+        ctx.fillStyle = i % 3 === 0
+          ? "rgba(205, 128, 62, 0.28)"
+          : "rgba(93, 154, 151, 0.24)";
+        ctx.fillRect(x - 2, baseY - heightBoost, 4, heightBoost);
+      }
+    };
+
+    const render = (now) => {
+      if (!ensureCanvas()) {
+        window.requestAnimationFrame(render);
+        return;
+      }
+
+      const rect = page.getBoundingClientRect();
+      if (Math.floor(rect.width) !== width || Math.floor(rect.height) !== height) {
+        resize();
+      }
+
+      const time = now / 1000;
+      ctx.clearRect(0, 0, width, height);
+      const gradient = ctx.createLinearGradient(0, 0, width, height);
+      gradient.addColorStop(0, "rgba(255, 242, 222, 0.92)");
+      gradient.addColorStop(0.55, "rgba(239, 207, 169, 0.78)");
+      gradient.addColorStop(1, "rgba(221, 174, 124, 0.72)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.globalCompositeOperation = "multiply";
+      ctx.fillStyle = "rgba(123, 80, 39, 0.05)";
+      for (let x = 0; x < width; x += 96) {
+        ctx.fillRect(x, 0, 1, height);
+      }
+      for (let y = 0; y < height; y += 88) {
+        ctx.fillRect(0, y, width, 1);
+      }
+      ctx.globalCompositeOperation = "source-over";
+
+      bands.forEach((band, index) => drawWave(time + phases[index], band, index));
+      drawBars(time);
+      window.requestAnimationFrame(render);
+    };
+
+    const observer = new MutationObserver(() => ensureCanvas());
+    observer.observe(document.body, { childList: true, subtree: true });
+    ensureCanvas();
+    window.addEventListener("resize", resize, { passive: true });
+    window.requestAnimationFrame(render);
+  };
+
+  window.requestAnimationFrame(updateVars);
+  initSpectrumCanvas();
+}
+"""
+SCROLL_TOP_JS = """
+() => {
+  document.body.classList.add("ar-page-switching");
+  window.setTimeout(() => document.body.classList.remove("ar-page-switching"), 1040);
+  window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+}
+"""
 
 REMOTE_HTML_PATTERNS = (
     re.compile(
@@ -34,8 +230,24 @@ REMOTE_HTML_PATTERNS = (
 )
 
 
+def _asset_data_url(filename: str) -> str:
+    path = ASSET_DIR / filename
+    if not path.exists():
+        return "none"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f'url("data:image/webp;base64,{encoded}")'
+
+
 def _read_css() -> str:
-    return CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
+    css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
+    if not css:
+        return css
+
+    background_vars = "\n".join(
+        f"  {name}: {_asset_data_url(filename)};"
+        for name, filename in BACKGROUND_ASSETS.items()
+    )
+    return f"{css}\n\n:root {{\n{background_vars}\n}}\n"
 
 
 def strip_remote_html_resources(html_text: str) -> str:
@@ -189,6 +401,143 @@ def _run(
     return _run_real_pipeline(input_file, strength_label, reference_text, force_recompute)
 
 
+def _build_audio_processing_page(
+    gr: Any,
+    *,
+    fixture_enabled: bool,
+    fixture_names: list[str],
+    default_fixture: str,
+) -> tuple[Any, list[Any]]:
+    gr.Markdown(
+        "## 后音频降噪增强处理\n"
+        "上传与设置 → 运行状态 → A/B 听感 → 双路转写 → 可视化 → 工程证据。",
+        elem_classes=["ar-hero", "ar-audio-hero"],
+    )
+
+    with gr.Row(equal_height=True, elem_classes=["ar-control-grid"]):
+        with gr.Column(scale=5, elem_classes=["ar-panel", "ar-upload-panel"]):
+            if fixture_enabled:
+                use_fixture = gr.Checkbox(
+                    value=True,
+                    label="开发专用：使用前端 fixture 假数据",
+                )
+                fixture = gr.Dropdown(
+                    choices=fixture_names,
+                    value=default_fixture,
+                    label="ProcessResult fixture",
+                    interactive=True,
+                )
+                gr.Markdown(
+                    "开发联调样例仅验证链路，不作为比赛效果证据。"
+                    "正式演示请重新以默认环境启动。",
+                    elem_classes=["ar-notice"],
+                )
+            else:
+                # Keep the callback signature stable without exposing a
+                # production-page switch capable of fabricating results.
+                use_fixture = gr.State(False)
+                fixture = gr.State("")
+            input_file = gr.Audio(label="上传音频", type="filepath")
+        with gr.Column(scale=4, elem_classes=["ar-panel", "ar-settings-panel"]):
+            strength = gr.Radio(
+                choices=["轻度", "标准", "强力"],
+                value="标准",
+                label="增强强度",
+            )
+            reference_text = gr.Textbox(
+                label="参考台词（可选）",
+                lines=2,
+                placeholder="参考文本只传给 pipeline 计算 CER，禁止进入 Whisper prompt。",
+            )
+            with gr.Accordion("工程选项", open=False, elem_classes=["ar-engineering"]):
+                force_recompute = gr.Checkbox(value=False, label="强制重算")
+            run_button = gr.Button("开始急救", variant="primary")
+
+    gr.Markdown(
+        "正在处理时：规范化 → 增强 → 双轨转写 → 可视化。当前没有实时阶段回调。",
+        elem_classes=["ar-process-note"],
+    )
+
+    with gr.Row(equal_height=True, elem_classes=["ar-result-grid"]):
+        status = gr.HTML(elem_classes=["ar-panel", "ar-status-panel"])
+        input_info = gr.Markdown(elem_classes=["ar-panel", "ar-meta-panel"])
+
+    playback_note = gr.Markdown(elem_classes=["ar-panel", "ar-playback-note"])
+
+    with gr.Row(equal_height=True, elem_classes=["ar-audio-grid"]):
+        original_audio = gr.HTML(
+            elem_classes=["ar-audio"],
+        )
+        enhanced_audio = gr.HTML(
+            elem_classes=["ar-audio"],
+        )
+
+    with gr.Row(equal_height=True, elem_classes=["ar-transcript-grid"]):
+        transcript_before = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
+        transcript_after = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
+
+    with gr.Row(equal_height=True, elem_classes=["ar-analysis-grid"]):
+        with gr.Column(scale=5, elem_classes=["ar-panel", "ar-diff-panel"]):
+            gr.Markdown("### 文本差异", elem_classes=["ar-section-title"])
+            diff = gr.HTML()
+        cer = gr.Markdown(elem_classes=["ar-panel", "ar-cer-panel"])
+
+    with gr.Row(equal_height=True, elem_classes=["ar-visual-grid"]):
+        spectrogram = gr.HTML(
+            elem_classes=["ar-visual"],
+        )
+        waveform = gr.HTML(
+            elem_classes=["ar-visual"],
+        )
+
+    with gr.Row(equal_height=True, elem_classes=["ar-evidence-grid"]):
+        runtime = gr.Markdown(elem_classes=["ar-panel", "ar-runtime-panel"])
+        with gr.Column(scale=1, elem_classes=["ar-panel", "ar-warning-panel"]):
+            gr.Markdown("### 警告与工程细节", elem_classes=["ar-section-title"])
+            warnings = gr.HTML()
+
+    with gr.Row(elem_classes=["ar-download-grid"]):
+        mixed_download = gr.HTML(
+            elem_classes=["ar-download"],
+        )
+        full_download = gr.HTML(
+            elem_classes=["ar-download"],
+        )
+        transcript_download = gr.HTML(
+            elem_classes=["ar-download"],
+        )
+        result_download = gr.HTML(
+            elem_classes=["ar-download"],
+        )
+
+    outputs = [
+        status,
+        input_info,
+        playback_note,
+        original_audio,
+        enhanced_audio,
+        transcript_before,
+        transcript_after,
+        diff,
+        cer,
+        spectrogram,
+        waveform,
+        runtime,
+        warnings,
+        mixed_download,
+        full_download,
+        transcript_download,
+        result_download,
+    ]
+
+    run_button.click(
+        _run,
+        inputs=[use_fixture, fixture, input_file, strength, reference_text, force_recompute],
+        outputs=outputs,
+    )
+    return fixture, outputs
+
+
 def build_demo():
     try:
         import gradio as gr
@@ -202,7 +551,14 @@ def build_demo():
     fixture_names = list_fixture_names() if fixture_enabled else []
     default_fixture = _first_fixture() if fixture_enabled else ""
     theme = gr.themes.Base(
-        font=["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+        font=[
+            "Avenir Next",
+            "DIN Alternate",
+            "SF Pro Display",
+            "PingFang SC",
+            "system-ui",
+            "sans-serif",
+        ],
         font_mono=["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
     )
 
@@ -211,135 +567,218 @@ def build_demo():
         title="听清又听懂·智能音频急救台",
         theme=theme,
         analytics_enabled=False,
-        elem_classes=["ar-app"],
+        js=APP_JS,
+        elem_classes=["ar-app", "ar-flow-app"],
     ) as demo:
-        gr.Markdown(
-            "# 听清又听懂·智能音频急救台\n"
-            "输入与设置 → 运行状态 → A/B 听感 → 双路转写 → 可视化 → 工程证据。",
-            elem_classes=["ar-hero"],
-        )
+        page_names = ("intro", "features", "audio", "meeting")
 
-        with gr.Row(equal_height=True, elem_classes=["ar-control-grid"]):
-            with gr.Column(scale=5, elem_classes=["ar-panel", "ar-upload-panel"]):
-                if fixture_enabled:
-                    use_fixture = gr.Checkbox(
-                        value=True,
-                        label="开发专用：使用前端 fixture 假数据",
-                    )
-                    fixture = gr.Dropdown(
-                        choices=fixture_names,
-                        value=default_fixture,
-                        label="ProcessResult fixture",
-                        interactive=True,
+        def show_page(page_name: str):
+            return tuple(
+                gr.update(visible=name == page_name)
+                for name in page_names
+            )
+
+        def show_intro():
+            return show_page("intro")
+
+        def show_features():
+            return show_page("features")
+
+        def show_audio():
+            return show_page("audio")
+
+        def show_meeting():
+            return show_page("meeting")
+
+        with gr.Column(
+            visible=True,
+            elem_classes=["ar-flow-page", "ar-poster-page"],
+        ) as intro_page:
+            with gr.Column(elem_classes=["ar-flow-inner", "ar-poster-inner"]):
+                gr.Markdown(
+                    "# AudioRescue\n"
+                    "**智能音频急救台**\n\n"
+                    "把嘈杂录音变成可听、可读、可交付的语音证据。\n\n"
+                    "当前分支：语音文件后的音频降噪增强处理 / 实时会议输入。",
+                    elem_classes=["ar-poster-copy"],
+                )
+                enter_button = gr.Button(
+                    "进入",
+                    variant="primary",
+                    size="lg",
+                    elem_classes=["ar-entry-button"],
+                )
+
+        with gr.Column(
+            visible=False,
+            elem_classes=["ar-flow-page", "ar-feature-page"],
+        ) as feature_page:
+            with gr.Column(elem_classes=["ar-flow-inner", "ar-feature-inner"]):
+                back_home = gr.Button(
+                    "返回首页",
+                    variant="secondary",
+                    size="sm",
+                    elem_classes=["ar-back-button"],
+                )
+                gr.Markdown(
+                    "## 选择工作流\n"
+                    "请选择本次要进入的 AudioRescue 功能。",
+                    elem_classes=["ar-page-heading"],
+                )
+                with gr.Row(equal_height=True, elem_classes=["ar-feature-grid"]):
+                    with gr.Column(elem_classes=["ar-feature-card", "ar-feature-card-audio"]):
+                        gr.Markdown(
+                            "### 后音频降噪增强处理\n"
+                            "面向已录制语音文件，保留当前上传、增强、A/B 播放、转写和证据导出流程。",
+                            elem_classes=["ar-feature-copy"],
+                        )
+                        audio_feature_button = gr.Button(
+                            "后音频降噪增强处理",
+                            variant="primary",
+                            elem_classes=["ar-feature-action"],
+                        )
+                    with gr.Column(elem_classes=["ar-feature-card", "ar-feature-card-meeting"]):
+                        gr.Markdown(
+                            "### 实时会议输入\n"
+                            "实时接入入口已预留，后续可扩展会议音频输入、实时转写和会议摘要。",
+                            elem_classes=["ar-feature-copy"],
+                        )
+                        meeting_feature_button = gr.Button(
+                            "实时会议输入",
+                            variant="secondary",
+                            elem_classes=["ar-feature-action", "ar-feature-action-muted"],
+                        )
+
+        with gr.Column(
+            visible=False,
+            elem_classes=["ar-flow-page", "ar-audio-page"],
+        ) as audio_page:
+            with gr.Column(elem_classes=["ar-flow-inner", "ar-audio-workspace"]):
+                back_from_audio = gr.Button(
+                    "返回功能选择",
+                    variant="secondary",
+                    size="sm",
+                    elem_classes=["ar-back-button"],
+                )
+                fixture, outputs = _build_audio_processing_page(
+                    gr,
+                    fixture_enabled=fixture_enabled,
+                    fixture_names=fixture_names,
+                    default_fixture=default_fixture,
+                )
+
+        with gr.Column(
+            visible=False,
+            elem_classes=["ar-flow-page", "ar-meeting-page"],
+        ) as meeting_page:
+            with gr.Column(elem_classes=["ar-flow-inner", "ar-meeting-inner"]):
+                back_from_meeting = gr.Button(
+                    "返回功能选择",
+                    variant="secondary",
+                    size="sm",
+                    elem_classes=["ar-back-button"],
+                )
+                gr.Markdown(
+                    "## 实时会议输入\n"
+                    "真实麦克风、虚拟麦、实时字幕和会议建议的统一控制台。",
+                    elem_classes=["ar-page-heading", "ar-meeting-heading"],
+                )
+                with gr.Row(equal_height=True, elem_classes=["ar-meeting-status-row"]):
+                    gr.Markdown(
+                        "### 音频引擎\n"
+                        "**待机**\n\n"
+                        "模式：enhanced · 实时倍率：-- · 错误：无",
+                        elem_classes=["ar-meeting-status-card"],
                     )
                     gr.Markdown(
-                        "开发联调样例仅验证链路，不作为比赛效果证据。"
-                        "正式演示请重新以默认环境启动。",
-                        elem_classes=["ar-notice"],
+                        "### 会议助手\n"
+                        "**未连接**\n\n"
+                        "实时字幕：0 · 正式记录：0 · 建议：待生成",
+                        elem_classes=["ar-meeting-status-card"],
                     )
-                else:
-                    # Keep the callback signature stable without exposing a
-                    # production-page switch capable of fabricating results.
-                    use_fixture = gr.State(False)
-                    fixture = gr.State("")
-                input_file = gr.Audio(label="上传音频", type="filepath")
-            with gr.Column(scale=4, elem_classes=["ar-panel", "ar-settings-panel"]):
-                strength = gr.Radio(
-                    choices=["轻度", "标准", "强力"],
-                    value="标准",
-                    label="增强强度",
-                )
-                reference_text = gr.Textbox(
-                    label="参考台词（可选）",
-                    lines=2,
-                    placeholder="参考文本只传给 pipeline 计算 CER，禁止进入 Whisper prompt。",
-                )
-                with gr.Accordion("工程选项", open=False, elem_classes=["ar-engineering"]):
-                    force_recompute = gr.Checkbox(value=False, label="强制重算")
-                run_button = gr.Button("开始急救", variant="primary")
+                    gr.Markdown(
+                        "### 悬浮提示窗\n"
+                        "**同源状态**\n\n"
+                        "主页面与悬浮窗共用同一份后端快照。",
+                        elem_classes=["ar-meeting-status-card"],
+                    )
 
-        gr.Markdown(
-            "正在处理时：规范化 → 增强 → 双轨转写 → 可视化。当前没有实时阶段回调。",
-            elem_classes=["ar-process-note"],
-        )
+                with gr.Row(equal_height=True, elem_classes=["ar-meeting-grid"]):
+                    with gr.Column(scale=4, elem_classes=["ar-meeting-panel", "ar-meeting-control-panel"]):
+                        gr.Markdown("### 设备与实时引擎", elem_classes=["ar-meeting-panel-title"])
+                        gr.Dropdown(
+                            ["选择真实麦克风后启动"],
+                            value="选择真实麦克风后启动",
+                            label="音频输入",
+                            interactive=False,
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        gr.Dropdown(
+                            ["普通监听输出", "BlackHole 2ch（检测后可用）"],
+                            value="普通监听输出",
+                            label="监听 / 虚拟麦输出",
+                            interactive=False,
+                            elem_classes=["ar-meeting-input"],
+                        )
+                        gr.Radio(
+                            ["enhanced", "quiet", "raw"],
+                            value="enhanced",
+                            label="实时模式",
+                            interactive=False,
+                            elem_classes=["ar-meeting-mode"],
+                        )
+                        with gr.Row(elem_classes=["ar-meeting-button-row"]):
+                            gr.Button("启动实时音频", variant="primary", elem_classes=["ar-meeting-action"])
+                            gr.Button("停止", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                        gr.Markdown(
+                            "输入块：-- · 输出块：-- · 丢帧：-- · P95：-- ms",
+                            elem_classes=["ar-meeting-meter"],
+                        )
 
-        with gr.Row(equal_height=True, elem_classes=["ar-result-grid"]):
-            status = gr.HTML(elem_classes=["ar-panel", "ar-status-panel"])
-            input_info = gr.Markdown(elem_classes=["ar-panel", "ar-meta-panel"])
+                    with gr.Column(scale=5, elem_classes=["ar-meeting-panel", "ar-meeting-transcript-panel"]):
+                        gr.Markdown("### 字幕与会议预设", elem_classes=["ar-meeting-panel-title"])
+                        gr.Textbox(
+                            label="会前会议预设",
+                            placeholder="填写会议主题、角色、目标和需要重点关注的表达方式。",
+                            lines=4,
+                            elem_classes=["ar-meeting-input", "ar-meeting-preset"],
+                        )
+                        with gr.Row(elem_classes=["ar-meeting-button-row"]):
+                            gr.Button("启动实时转写", variant="primary", elem_classes=["ar-meeting-action"])
+                            gr.Button("停止会议助手", variant="secondary", elem_classes=["ar-meeting-action", "ar-meeting-action-muted"])
+                        gr.Markdown(
+                            "#### 实时未定稿字幕\n"
+                            "等待增强后的 16 kHz 音频进入转写流。",
+                            elem_classes=["ar-meeting-live-text"],
+                        )
+                        gr.Markdown(
+                            "#### 正式字幕记录\n"
+                            "暂无确认字幕。",
+                            elem_classes=["ar-meeting-log"],
+                        )
 
-        playback_note = gr.Markdown(elem_classes=["ar-panel", "ar-playback-note"])
+                    with gr.Column(scale=4, elem_classes=["ar-meeting-panel", "ar-meeting-assist-panel"]):
+                        gr.Markdown("### 会议建议", elem_classes=["ar-meeting-panel-title"])
+                        gr.Markdown(
+                            "#### 最新建议\n"
+                            "启动会议助手后，这里显示最新大模型建议。",
+                            elem_classes=["ar-meeting-suggestion"],
+                        )
+                        gr.Button("立即生成下一句建议", variant="primary", elem_classes=["ar-meeting-action"])
+                        gr.Markdown(
+                            "#### 悬浮提示窗口预览\n"
+                            "**当前建议**\n\n"
+                            "这里将同步显示与主页面相同的字幕和建议状态。",
+                            elem_classes=["ar-meeting-float-preview"],
+                        )
 
-        with gr.Row(equal_height=True, elem_classes=["ar-audio-grid"]):
-            original_audio = gr.HTML(
-                elem_classes=["ar-audio"],
-            )
-            enhanced_audio = gr.HTML(
-                elem_classes=["ar-audio"],
-            )
-
-        with gr.Row(equal_height=True, elem_classes=["ar-transcript-grid"]):
-            transcript_before = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
-            transcript_after = gr.Markdown(elem_classes=["ar-panel", "ar-transcript"])
-
-        with gr.Row(equal_height=True, elem_classes=["ar-analysis-grid"]):
-            with gr.Column(scale=5, elem_classes=["ar-panel", "ar-diff-panel"]):
-                gr.Markdown("### 文本差异", elem_classes=["ar-section-title"])
-                diff = gr.HTML()
-            cer = gr.Markdown(elem_classes=["ar-panel", "ar-cer-panel"])
-
-        with gr.Row(equal_height=True, elem_classes=["ar-visual-grid"]):
-            spectrogram = gr.HTML(
-                elem_classes=["ar-visual"],
-            )
-            waveform = gr.HTML(
-                elem_classes=["ar-visual"],
-            )
-
-        with gr.Row(equal_height=True, elem_classes=["ar-evidence-grid"]):
-            runtime = gr.Markdown(elem_classes=["ar-panel", "ar-runtime-panel"])
-            with gr.Column(scale=1, elem_classes=["ar-panel", "ar-warning-panel"]):
-                gr.Markdown("### 警告与工程细节", elem_classes=["ar-section-title"])
-                warnings = gr.HTML()
-
-        with gr.Row(elem_classes=["ar-download-grid"]):
-            mixed_download = gr.HTML(
-                elem_classes=["ar-download"],
-            )
-            full_download = gr.HTML(
-                elem_classes=["ar-download"],
-            )
-            transcript_download = gr.HTML(
-                elem_classes=["ar-download"],
-            )
-            result_download = gr.HTML(
-                elem_classes=["ar-download"],
-            )
-
-        outputs = [
-            status,
-            input_info,
-            playback_note,
-            original_audio,
-            enhanced_audio,
-            transcript_before,
-            transcript_after,
-            diff,
-            cer,
-            spectrogram,
-            waveform,
-            runtime,
-            warnings,
-            mixed_download,
-            full_download,
-            transcript_download,
-            result_download,
-        ]
-
-        run_button.click(
-            _run,
-            inputs=[use_fixture, fixture, input_file, strength, reference_text, force_recompute],
-            outputs=outputs,
-        )
+        pages = [intro_page, feature_page, audio_page, meeting_page]
+        enter_button.click(show_features, outputs=pages, js=SCROLL_TOP_JS)
+        back_home.click(show_intro, outputs=pages, js=SCROLL_TOP_JS)
+        audio_feature_button.click(show_audio, outputs=pages, js=SCROLL_TOP_JS)
+        meeting_feature_button.click(show_meeting, outputs=pages, js=SCROLL_TOP_JS)
+        back_from_audio.click(show_features, outputs=pages, js=SCROLL_TOP_JS)
+        back_from_meeting.click(show_features, outputs=pages, js=SCROLL_TOP_JS)
 
         if default_fixture and fixture_enabled:
             demo.load(_run_fixture, inputs=[fixture], outputs=outputs)

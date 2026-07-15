@@ -16,9 +16,13 @@ from urllib.parse import quote, unquote
 from ui.presenters import UI_TUPLE_KEYS
 from ui.file_delivery import FileDeliveryMiddleware
 from ui.layout import (
+    APP_JS,
+    BACKGROUND_ASSETS,
     CSS_PATH,
     OfflineHtmlResourceMiddleware,
+    SCROLL_TOP_JS,
     _fixture_mode_default,
+    _read_css,
     _run,
     _run_fixture,
     _run_real_pipeline,
@@ -324,8 +328,9 @@ class LayoutSafetyTest(unittest.TestCase):
         self.assertEqual(demo.kind, "Blocks")
         blocks_kwargs = calls[0][2]
         self.assertFalse(blocks_kwargs["analytics_enabled"])
+        self.assertEqual(blocks_kwargs["js"], APP_JS)
         self.assertEqual(blocks_kwargs["theme"][0], "BaseTheme")
-        self.assertEqual(blocks_kwargs["theme"][2]["font"][0], "system-ui")
+        self.assertEqual(blocks_kwargs["theme"][2]["font"][0], "Avenir Next")
         labels = [str(kwargs.get("label", "")) for _, _, kwargs in calls]
         self.assertNotIn("开发专用：使用前端 fixture 假数据", labels)
         self.assertEqual([kwargs.get("label") for kind, _, kwargs in calls if kind == "Audio"], ["上传音频"])
@@ -334,6 +339,40 @@ class LayoutSafetyTest(unittest.TestCase):
         self.assertTrue(any(kind == "State" for kind, _, _ in calls))
         self.assertTrue(any(event == "click" for event, _, _ in events))
         self.assertFalse(any(event == "load" for event, _, _ in events))
+        button_texts = [
+            str(args[0])
+            for kind, args, _ in calls
+            if kind == "Button" and args
+        ]
+        for expected in (
+            "进入",
+            "后音频降噪增强处理",
+            "实时会议输入",
+            "开始急救",
+        ):
+            self.assertIn(expected, button_texts)
+        visible_columns = [
+            kwargs.get("visible")
+            for kind, _, kwargs in calls
+            if kind == "Column" and "ar-flow-page" in kwargs.get("elem_classes", [])
+        ]
+        self.assertEqual(visible_columns, [True, False, False, False])
+        self.assertTrue(
+            all(kwargs.get("js") == SCROLL_TOP_JS for _, _, kwargs in events if kwargs.get("js"))
+        )
+
+    def test_flow_background_assets_are_packaged_and_inlined(self) -> None:
+        css = _read_css()
+        self.assertIn('data:image/webp;base64,', css)
+        self.assertIn("--ar-pointer-x", css)
+        self.assertIn("--ar-display-font", css)
+        self.assertIn("--ar-art-font", css)
+        self.assertIn(".ar-spectrum-canvas", css)
+        self.assertNotIn(str(CSS_PATH.parent / "assets"), css)
+        for var_name, filename in BACKGROUND_ASSETS.items():
+            with self.subTest(filename=filename):
+                self.assertTrue((CSS_PATH.parent / "assets" / filename).exists())
+                self.assertIn(f"{var_name}: url(", css)
 
     def test_status_component_uses_html_for_semantic_state_markup(self) -> None:
         calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
