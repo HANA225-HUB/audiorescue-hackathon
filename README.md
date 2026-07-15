@@ -80,67 +80,20 @@ AUDIORESCUE_UI_FIXTURE=1 python app.py
 
 - 冻结配置：[`configs/app.yaml`](configs/app.yaml)
 - 每次任务：`outputs/{job_id}/`
-- 正式本地数据：`data_local/`，不会提交
+- 正式本地数据：private data root，不会提交
 - 正式演示素材：仅经 C 审核后放入 `demo_assets/`
 
 ## 私有录音数据工作流
 
-下列工具只使用私有数据根目录，不会把母带、冻结集或运行结果加入 Git。公开文档不记录私有参考文本、成员映射、锁定样例名或录音文件名。
+私有录音、参考文本、授权台账、评测划分、盲听配对和运行结果都只保存在本地私有工作区。公开仓库只保留中性原则：
 
-```bash
-# 1. 幂等初始化：可重复执行，不覆盖已有台账或音频
-python scripts/init_dataset.py --root <private-data-root>
+- 使用 synthetic fixture 做公开测试和 UI 验证；
+- approved short sample 只在本地私有台账确认后用于 smoke 或演示候选；
+- reserved evaluation set 只在冻结后一次性使用，不用于调参、公开调试或补证；
+- 公开报告只写安全摘要、测试命令和通过数量；
+- 不公开私有文本、成员映射、真实文件名、样例数量、路径、哈希、答案表或逐样例指标。
 
-# 2. 原始 M4A/AAC/WAV 先放入私有来源目录
-#    然后在 recording_metadata.csv 填 source_original_path
-#    录音进行中可只处理已就绪条目
-python scripts/standardize_recordings.py --data-root <private-data-root> --available-only
-
-# 3. 全部母带就绪后运行最终严格模式
-python scripts/standardize_recordings.py --data-root <private-data-root>
-
-# 4. 在 recording_metadata.csv 中逐条确认 consent_status=yes；
-#    原始/标准化 SHA-256 必须已由上一步填写且保持匹配
-
-# 5. 生成私有 manifest 和固定混音
-python scripts/build_dataset.py \
-  --dataset-root <private-data-root> \
-  --consent-or-license team-approved-for-competition-evaluation
-
-# 6. 校验 WAV、manifest、哈希、命名和授权状态
-python scripts/validate_dataset.py <private-data-root>
-```
-
-开发集生成后，可批量运行：
-
-```bash
-python scripts/run_evaluation.py \
-  --manifest <private-manifest> \
-  --dataset-root <private-data-root> \
-  --split dev \
-  --output-dir <private-output-dir> \
-  --force-recompute
-```
-
-只在模型、强度、代码、授权和私有 manifest 全部完成，且 Git 工作区干净后冻结：
-
-```bash
-python scripts/freeze_experiment.py
-```
-
-冻结测试集是一次性正式评测，不能用来试跑、调参或补证。需要修复崩溃时必须保留回执并创建明确的新实验版本，不得删除回执冒充首次评测。
-
-生成三人盲听包时，先准备一个私有配对表。配对表、参考文本、授权台账和答案表都只保存在私有工作区。
-
-然后生成三个随机、逐成员跨样例平衡的匿名试听包；每个人看到原轨位于 A/B 的次数差不超过 1。答案表仅由 C 保管：
-
-```bash
-python scripts/prepare_blind_ab.py \
-  --pairs <private-pairs-csv> \
-  --output <private-blind-output-dir>
-```
-
-该工具只做随机、平衡和逐字节复制，不替成员判断听感。盲听完成前不要打开答案表，也不要把私有参考文本、授权台账或答案表提交 Git。
+具体私有数据命令由 C 在本地私有 runbook 中执行和审计，不复制到公开 PR、Issue、截图或日志。
 
 ## 合入前最低检查
 
