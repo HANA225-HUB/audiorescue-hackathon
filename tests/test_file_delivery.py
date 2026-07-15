@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+import binascii
+import struct
 import unittest
 import wave
+import zlib
 from asyncio import run
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -68,6 +71,16 @@ def _write_float_wav_header(path: Path) -> None:
         + len(data).to_bytes(4, "little")
         + data
     )
+
+
+def _valid_png_bytes() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = binascii.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 async def _receive():
@@ -178,12 +191,21 @@ class FileDeliveryTests(unittest.TestCase):
                     )
                     self.assertIsNone(url)
 
-            image = root / "spectrogram.png"
-            image.write_bytes(b"not validated as audio")
+            invalid_image = root / "spectrogram.png"
+            invalid_image.write_bytes(b"not a png")
+            self.assertIsNone(
+                register_file_for_delivery(
+                    invalid_image,
+                    filename="spectrogram.png",
+                    allowed_roots=(root,),
+                )
+            )
+            valid_image = root / "waveform.png"
+            valid_image.write_bytes(_valid_png_bytes())
             self.assertIsNotNone(
                 register_file_for_delivery(
-                    image,
-                    filename="spectrogram.png",
+                    valid_image,
+                    filename="waveform.png",
                     allowed_roots=(root,),
                 )
             )
@@ -215,7 +237,7 @@ class FileDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "mixed.wav"
-            _write_pcm_wav(source, b"0123456789", sample_width=1)
+            _write_pcm_wav(source, b"\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00")
             body = source.read_bytes()
             url = register_file_for_delivery(source, filename="mixed.wav", allowed_roots=(root,))
             self.assertIsNotNone(url)
@@ -333,16 +355,48 @@ class FileDeliveryTests(unittest.TestCase):
             self.assertEqual(run(_request(str(directory_url)))[0]["status"], 410)
 
             if hasattr(os, "symlink"):
-                target = root / "target.wav"
-                target.write_bytes(b"target")
-                link = root / "link.wav"
-                link.write_bytes(b"link")
+                target = root / "target.png"
+                target.write_bytes(_valid_png_bytes())
+                link = root / "link.png"
+                link.write_bytes(_valid_png_bytes())
                 link_url = register_file_for_delivery(
                     link, filename="waveform.png", allowed_roots=(root,)
                 )
+                self.assertIsNotNone(link_url)
                 link.unlink()
                 os.symlink(target, link)
                 self.assertEqual(run(_request(str(link_url)))[0]["status"], 410)
+
+    def test_rewrite_replace_and_range_races_fail_closed_before_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "mixed.wav"
+            _write_pcm_wav(source, b"\x01\x00\x02\x00")
+            url = register_file_for_delivery(source, filename="mixed.wav", allowed_roots=(root,))
+            self.assertIsNotNone(url)
+            entry = lookup_delivery_entry(str(url))
+            self.assertIsNotNone(entry)
+            assert entry is not None
+
+            _write_pcm_wav(source, b"\x03\x00\x04\x00")
+            os.utime(source, ns=(entry.mtime_ns, entry.mtime_ns))
+            sent = run(_request(str(url), headers=[(b"range", b"bytes=0-3")]))
+            self.assertEqual(sent[0]["status"], 410)
+            self.assertNotIn(b"content-range", _headers(sent[0]))
+
+            replaced = root / "replaced.wav"
+            _write_pcm_wav(replaced, b"\x05\x00\x06\x00")
+            replaced_url = register_file_for_delivery(
+                replaced,
+                filename="mixed.wav",
+                allowed_roots=(root,),
+            )
+            self.assertIsNotNone(replaced_url)
+            replacement = root / "replacement.wav"
+            _write_pcm_wav(replacement, b"\x05\x00\x06\x00")
+            replaced.unlink()
+            os.replace(replacement, replaced)
+            self.assertEqual(run(_request(str(replaced_url)))[0]["status"], 410)
 
     def test_staging_cleanup_invalidates_delivery_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,8 +432,8 @@ class FileDeliveryTests(unittest.TestCase):
             second = root / "job-b" / "mixed.wav"
             first.parent.mkdir()
             second.parent.mkdir()
-            _write_pcm_wav(first, b"first-job", sample_width=1)
-            _write_pcm_wav(second, b"second-job", sample_width=1)
+            _write_pcm_wav(first, b"\x10\x00\x11\x00")
+            _write_pcm_wav(second, b"\x20\x00\x21\x00")
             first_body = first.read_bytes()
             second_body = second.read_bytes()
             first_url = register_file_for_delivery(first, filename="mixed.wav", allowed_roots=(root,))

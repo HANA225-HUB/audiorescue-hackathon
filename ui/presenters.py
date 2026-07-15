@@ -15,13 +15,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .file_delivery import register_files_for_delivery
+from .file_delivery import register_files_for_delivery, unregister_delivery_url
 from .file_staging import (
     default_staging_root,
-    is_valid_pcm_wav,
     resolve_allowed_file,
     stage_files_for_gradio,
 )
+from .media_validation import media_kind_for_role, validate_media_path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT_DIR / "tests" / "fixtures"
@@ -101,6 +101,7 @@ UI_WARNING_CODES = {
     "UI_FILE_DELIVERY_FAILED",
     "UI_FILE_DELIVERY_OPTIONAL",
     "UI_RESULT_INCOMPLETE",
+    "UI_MEDIA_INVALID",
     "UI_WAV_INVALID",
 }
 
@@ -132,6 +133,7 @@ WARNING_MESSAGES = {
     "UI_FILE_DELIVERY_FAILED": "页面文件投递失败，相关播放器或下载已关闭。",
     "UI_FILE_DELIVERY_OPTIONAL": "调试文件投递失败，核心播放结果不受影响。",
     "UI_RESULT_INCOMPLETE": "页面结果不完整，已按可用内容降级展示。",
+    "UI_MEDIA_INVALID": "媒体文件不可展示，相关播放器或图片已关闭。",
     "UI_WAV_INVALID": "音频文件不可播放，相关播放器或下载已关闭。",
     "UNKNOWN": "出现未分类警告，细节已隐藏。",
 }
@@ -203,6 +205,7 @@ DETAIL_ENUM_VALUES = {
     "reason": {
         "missing",
         "unavailable",
+        "invalid_media",
         "invalid_wav",
         "result_incomplete",
         "transcript_missing",
@@ -234,7 +237,6 @@ DELIVERY_ROLE_LABELS = {
     "spectrogram_image": "spectrogram",
     "waveform_image": "waveform",
 }
-WAV_DELIVERY_ROLES = ("original_audio", "mixed_audio", "full_audio")
 
 
 def json_ready(value: Any) -> Any:
@@ -754,17 +756,20 @@ def _register_delivery_urls(staged_files: dict[str, str | None]) -> dict[str, st
     return {role: urls.get(role) for role in DELIVERY_ROLES}
 
 
-def _invalid_wav_roles(
+def _invalid_media_roles(
     paths_by_role: dict[str, Any],
     staged_files: dict[str, str | None],
     *,
     allowed_roots: tuple[Path, ...],
 ) -> set[str]:
     invalid: set[str] = set()
-    for role in WAV_DELIVERY_ROLES:
+    for role in DELIVERY_ROLES:
+        kind = media_kind_for_role(role)
+        if kind is None:
+            continue
         staged = staged_files.get(role)
         try:
-            if staged and not is_valid_pcm_wav(Path(staged)):
+            if staged and not validate_media_path(Path(staged), kind=kind):
                 invalid.add(role)
                 continue
             raw_path = paths_by_role.get(role)
@@ -774,23 +779,43 @@ def _invalid_wav_roles(
                     allowed_roots=allowed_roots,
                     base_dir=ROOT_DIR,
                 )
-                if resolved is not None and not is_valid_pcm_wav(resolved):
+                if resolved is not None and not validate_media_path(resolved, kind=kind):
                     invalid.add(role)
         except Exception:
             continue
     return invalid
 
 
+def _effective_delivery_urls(
+    delivery_urls: dict[str, str | None],
+    staged_files: dict[str, str | None],
+    invalid_media_roles: set[str],
+) -> dict[str, str | None]:
+    effective = {role: delivery_urls.get(role) for role in DELIVERY_ROLES}
+    for role, url in list(effective.items()):
+        if not url:
+            continue
+        if role in invalid_media_roles or not staged_files.get(role):
+            unregister_delivery_url(url)
+            effective[role] = None
+    return effective
+
+
 def _delivery_warning(
     role: str,
     *,
     required: bool,
-    invalid_wav: bool = False,
+    invalid_media: bool = False,
 ) -> dict[str, Any]:
     track = DELIVERY_ROLE_LABELS.get(role, "original")
-    code = "UI_WAV_INVALID" if invalid_wav else (
-        "UI_FILE_DELIVERY_FAILED" if required else "UI_FILE_DELIVERY_OPTIONAL"
-    )
+    if invalid_media and media_kind_for_role(role) == "wav":
+        code = "UI_WAV_INVALID"
+    elif invalid_media:
+        code = "UI_MEDIA_INVALID"
+    else:
+        code = (
+            "UI_FILE_DELIVERY_FAILED" if required else "UI_FILE_DELIVERY_OPTIONAL"
+        )
     return {
         "code": code,
         "message": "",
@@ -800,7 +825,13 @@ def _delivery_warning(
             "track": track,
             "role": track,
             "required": required,
-            "reason": "invalid_wav" if code == "UI_WAV_INVALID" else "delivery_failed",
+            "reason": (
+                "invalid_wav"
+                if code == "UI_WAV_INVALID"
+                else "invalid_media"
+                if code == "UI_MEDIA_INVALID"
+                else "delivery_failed"
+            ),
             "stage": "delivery",
         },
     }
@@ -825,14 +856,26 @@ def _warning_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else []
 
 
-def _finite_number(value: Any) -> bool:
-    if isinstance(value, bool):
+def _finite_non_negative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in {float("inf"), float("-inf")} or number < 0:
+        return None
+    return number
+
+
+def _transcript_segment_is_complete(segment: Any) -> bool:
+    item = as_dict(segment)
+    if set(item) != {"start", "end", "text"}:
         return False
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
+    if not isinstance(item.get("text"), str):
         return False
-    return number == number and number not in {float("inf"), float("-inf")}
+    start = _finite_non_negative_number(item.get("start"))
+    end = _finite_non_negative_number(item.get("end"))
+    if start is None or end is None or end < start:
+        return False
+    return True
 
 
 def _transcript_is_complete(value: Any) -> bool:
@@ -850,20 +893,14 @@ def _transcript_is_complete(value: Any) -> bool:
         return False
     if not isinstance(segments, list):
         return False
-    if not _finite_number(data.get("runtime_seconds")):
+    if _finite_non_negative_number(data.get("runtime_seconds")) is None:
         return False
     if not isinstance(model_name, str) or not model_name.strip():
         return False
-    if error not in (None, ""):
+    if error is not None:
         return False
     for segment in segments:
-        item = as_dict(segment)
-        if (
-            not item
-            or not _finite_number(item.get("start"))
-            or not _finite_number(item.get("end"))
-            or not isinstance(item.get("text"), str)
-        ):
+        if not _transcript_segment_is_complete(segment):
             return False
     return True
 
@@ -872,7 +909,7 @@ def _presentation_status_and_warnings(
     result: dict[str, Any],
     paths_by_role: dict[str, Any],
     delivery_urls: dict[str, str | None],
-    invalid_wav_roles: set[str],
+    invalid_media_roles: set[str],
 ) -> tuple[str, list[dict[str, Any]]]:
     raw_status = _normalized_status(result.get("status"))
     ui_warnings: list[dict[str, Any]] = []
@@ -888,7 +925,7 @@ def _presentation_status_and_warnings(
                     _delivery_warning(
                         role,
                         required=True,
-                        invalid_wav=role in invalid_wav_roles,
+                        invalid_media=role in invalid_media_roles,
                     )
                 )
         delivered_count = sum(1 for delivered in required_ok.values() if delivered)
@@ -906,7 +943,7 @@ def _presentation_status_and_warnings(
                     _delivery_warning(
                         role,
                         required=True,
-                        invalid_wav=role in invalid_wav_roles,
+                        invalid_media=role in invalid_media_roles,
                     )
                 )
 
@@ -915,9 +952,20 @@ def _presentation_status_and_warnings(
             _delivery_warning(
                 "full_audio",
                 required=False,
-                invalid_wav="full_audio" in invalid_wav_roles,
+                invalid_media="full_audio" in invalid_media_roles,
             )
         )
+
+    if raw_status in {"success", "partial"}:
+        for role in ("spectrogram_image", "waveform_image"):
+            if role in invalid_media_roles and not delivery_urls.get(role):
+                ui_warnings.append(
+                    _delivery_warning(
+                        role,
+                        required=False,
+                        invalid_media=True,
+                    )
+                )
 
     if raw_status == "success":
         incomplete = False
@@ -945,7 +993,7 @@ def _presentation_status_and_warnings(
                         DELIVERY_ROLE_LABELS[role],
                         reason=(
                             "visual_delivery_failed"
-                            if paths_by_role.get(role)
+                            if paths_by_role.get(role) or role in invalid_media_roles
                             else "visual_missing"
                         ),
                     )
@@ -972,16 +1020,21 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
     }
     staged_files = _stage_result_files(paths_by_role, allowed_roots=allowed_roots)
     delivery_urls = _register_delivery_urls(staged_files)
-    invalid_wav_roles = _invalid_wav_roles(
+    invalid_media_roles = _invalid_media_roles(
         paths_by_role,
         staged_files,
         allowed_roots=allowed_roots,
     )
+    effective_delivery_urls = _effective_delivery_urls(
+        delivery_urls,
+        staged_files,
+        invalid_media_roles,
+    )
     presentation_status, ui_warnings = _presentation_status_and_warnings(
         result,
         paths_by_role,
-        delivery_urls,
-        invalid_wav_roles,
+        effective_delivery_urls,
+        invalid_media_roles,
     )
     display_result = {
         **result,
@@ -994,13 +1047,13 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
         "playback_note_md": playback_note_markdown(display_result),
         "original_audio": _audio_delivery_html(
             title="处理前：标准化原轨",
-            url=delivery_urls["original_audio"],
+            url=effective_delivery_urls["original_audio"],
             filename=DELIVERY_FILENAMES["original_audio"],
             role="original_audio",
         ),
         "enhanced_audio": _audio_delivery_html(
             title="增强后：混合增强轨",
-            url=delivery_urls["mixed_audio"],
+            url=effective_delivery_urls["mixed_audio"],
             filename=DELIVERY_FILENAMES["mixed_audio"],
             role="mixed_audio",
         ),
@@ -1010,25 +1063,25 @@ def result_to_view(raw_result: Any) -> dict[str, Any]:
         "cer_md": cer_markdown(result),
         "spectrogram_image": _image_delivery_html(
             title="声谱图对照",
-            url=delivery_urls["spectrogram_image"],
+            url=effective_delivery_urls["spectrogram_image"],
             role="spectrogram_image",
         ),
         "waveform_image": _image_delivery_html(
             title="波形对照",
-            url=delivery_urls["waveform_image"],
+            url=effective_delivery_urls["waveform_image"],
             role="waveform_image",
         ),
         "runtime_md": runtime_markdown(display_result),
         "warnings_html": warnings_html(display_result),
         "mixed_download": _download_delivery_html(
             title="混合增强 WAV",
-            url=delivery_urls["mixed_audio"],
+            url=effective_delivery_urls["mixed_audio"],
             filename=DELIVERY_FILENAMES["mixed_audio"],
             role="mixed_download",
         ),
         "full_download": _download_delivery_html(
             title="100% 增强调试 WAV",
-            url=delivery_urls["full_audio"],
+            url=effective_delivery_urls["full_audio"],
             filename=DELIVERY_FILENAMES["full_audio"],
             role="full_download",
             audio_preview=True,

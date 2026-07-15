@@ -225,9 +225,9 @@ class OfflineMiddlewareTest(unittest.TestCase):
             original = root / "original.wav"
             mixed = root / "mixed.wav"
             full = root / "full.wav"
-            _write_pcm_wav(original, b"original-bytes", sample_width=1)
-            _write_pcm_wav(mixed, b"mixed-bytes", sample_width=1)
-            _write_pcm_wav(full, b"full-bytes", sample_width=1)
+            _write_pcm_wav(original, b"\x10\x00\x11\x00")
+            _write_pcm_wav(mixed, b"\x20\x00\x21\x00")
+            _write_pcm_wav(full, b"\x30\x00\x31\x00")
             original_bytes = original.read_bytes()
             mixed_bytes = mixed.read_bytes()
             full_bytes = full.read_bytes()
@@ -253,8 +253,7 @@ class OfflineMiddlewareTest(unittest.TestCase):
             source = root / "original.wav"
             _write_pcm_wav(
                 source,
-                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/x.js"></script>RIFF',
-                sample_width=1,
+                b'<script src="https://cdnjs.cloudflare.com/ajax/libs/x.js"></script>RIFF\x00',
             )
             url = register_file_for_delivery(
                 source,

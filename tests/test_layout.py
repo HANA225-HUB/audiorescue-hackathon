@@ -2,9 +2,12 @@ import os
 import re
 import sys
 import tempfile
+import binascii
+import struct
 import types
 import unittest
 import wave
+import zlib
 from asyncio import run
 from pathlib import Path
 from unittest import mock
@@ -85,6 +88,16 @@ def _write_pcm_wav(path: Path, frames: bytes = b"\x00\x00\x01\x00") -> None:
         wav_file.setsampwidth(2)
         wav_file.setframerate(48000)
         wav_file.writeframes(frames)
+
+
+def _valid_png_bytes() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = binascii.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 def _valid_transcript(text: str = "ok") -> dict[str, object]:
@@ -172,8 +185,8 @@ class LayoutSafetyTest(unittest.TestCase):
             waveform = job_root / "waveform.png"
             _write_pcm_wav(original)
             _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
-            spectrogram.write_bytes(b"spectrogram")
-            waveform.write_bytes(b"waveform")
+            spectrogram.write_bytes(_valid_png_bytes())
+            waveform.write_bytes(_valid_png_bytes())
 
             def fake_process_audio(**kwargs):
                 calls.append(kwargs)
@@ -214,6 +227,52 @@ class LayoutSafetyTest(unittest.TestCase):
             ],
         )
         self.assertTrue(any("急救完成" in str(item) for item in rendered))
+
+    def test_fixture_callback_complete_success_synthetic_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            job_root = root / "outputs" / "fixture_success"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            full = job_root / "full.wav"
+            spectrogram = job_root / "spectrogram.png"
+            waveform = job_root / "waveform.png"
+            _write_pcm_wav(original)
+            _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
+            _write_pcm_wav(full, b"\x04\x00\x05\x00")
+            spectrogram.write_bytes(_valid_png_bytes())
+            waveform.write_bytes(_valid_png_bytes())
+            result = {
+                "job_id": "fixture_success",
+                "status": "success",
+                "runtime": {"total_seconds": 0.1},
+                "original_audio_path": str(original),
+                "mixed_output_path": str(mixed),
+                "enhanced_audio_path": str(mixed),
+                "full_output_path": str(full),
+                "transcript_before": _valid_transcript("before"),
+                "transcript_after": _valid_transcript("after"),
+                "spectrogram_path": str(spectrogram),
+                "waveform_path": str(waveform),
+                "warnings": [],
+                "events": [],
+                "config_snapshot": {
+                    "sample_notice": "UI fixture，仅验证页面状态，不是模型效果",
+                },
+            }
+
+            with mock.patch("ui.layout.load_fixture", return_value=result), mock.patch(
+                "ui.presenters.ROOT_DIR", root
+            ), mock.patch.dict(os.environ, {"AUDIORESCUE_UI_STAGING_DIR": str(Path(stage_tmp) / "ui-stage")}):
+                view = dict(zip(UI_TUPLE_KEYS, _run_fixture("process_result_success_synthetic")))
+
+        self.assertIn("data-status='success'", view["status_md"])
+        self.assertIn("UI fixture，仅验证页面状态，不是模型效果", view["status_md"])
+        self.assertIn("<audio", view["original_audio"])
+        self.assertIn("<audio", view["enhanced_audio"])
+        self.assertIn("<img", view["spectrogram_image"])
+        self.assertIn("<img", view["waveform_image"])
 
     def test_build_demo_smoke_does_not_expose_fixture_by_default(self) -> None:
         calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []

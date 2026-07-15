@@ -7,9 +7,10 @@ import shutil
 import tempfile
 import time
 import uuid
-import wave
 from pathlib import Path
 from typing import Any, Mapping
+
+from .media_validation import media_kind_for_role, validate_media_path
 
 DEFAULT_STAGING_TTL_SECONDS = 60 * 60
 STAGING_ENV = "AUDIORESCUE_UI_STAGING_DIR"
@@ -22,9 +23,6 @@ _ROLE_FILENAMES = {
     "spectrogram_image": "spectrogram.png",
     "waveform_image": "waveform.png",
 }
-
-_WAV_ROLES = {"original_audio", "mixed_audio", "full_audio"}
-
 
 def default_staging_root() -> Path:
     configured = os.environ.get(STAGING_ENV)
@@ -122,25 +120,7 @@ def _prepare_session_dir(staging_root: Path) -> Path:
 def is_valid_pcm_wav(path: Path) -> bool:
     """Return whether path is a non-empty, fully readable PCM WAV file."""
 
-    try:
-        with wave.open(str(path), "rb") as wav_file:
-            channels = wav_file.getnchannels()
-            sample_rate = wav_file.getframerate()
-            sample_width = wav_file.getsampwidth()
-            frame_count = wav_file.getnframes()
-            if (
-                wav_file.getcomptype() != "NONE"
-                or channels <= 0
-                or sample_rate <= 0
-                or sample_width <= 0
-                or frame_count <= 0
-            ):
-                return False
-            expected_bytes = frame_count * channels * sample_width
-            data = wav_file.readframes(frame_count)
-            return len(data) == expected_bytes
-    except (EOFError, OSError, RuntimeError, wave.Error):
-        return False
+    return validate_media_path(path, kind="wav")
 
 
 def stage_files_for_gradio(
@@ -168,7 +148,7 @@ def stage_files_for_gradio(
             base_dir=base_dir,
         )
         if resolved is not None:
-            if role in _WAV_ROLES and not is_valid_pcm_wav(resolved):
+            if not validate_media_path(resolved, kind=media_kind_for_role(role)):
                 continue
             resolved_by_role[role] = resolved
 
@@ -186,7 +166,7 @@ def stage_files_for_gradio(
         try:
             shutil.copyfile(source, destination)
             os.chmod(destination, 0o600)
-            if role in _WAV_ROLES and not is_valid_pcm_wav(destination):
+            if not validate_media_path(destination, kind=media_kind_for_role(role)):
                 raise OSError
         except OSError:
             destination.unlink(missing_ok=True)

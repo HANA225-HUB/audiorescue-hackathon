@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 import re
 import secrets
 import threading
 import time
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+from .media_validation import (
+    ValidatedMedia,
+    media_kind_for_name,
+    validate_and_hash_fd,
+)
 
 DELIVERY_PREFIX = "/audiorescue-files"
 _DELIVERY_PREFIX_BYTES = DELIVERY_PREFIX.encode("ascii")
@@ -34,6 +40,7 @@ class DeliveryEntry:
     mtime_ns: int
     inode: int
     device: int
+    digest: str
     expires_at: float
 
     @property
@@ -61,26 +68,14 @@ def _safe_token() -> str:
     return secrets.token_urlsafe(24)
 
 
-def _is_valid_pcm_wav(path: Path) -> bool:
+def _open_no_follow(path: Path) -> int | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        with wave.open(str(path), "rb") as wav_file:
-            channels = wav_file.getnchannels()
-            sample_rate = wav_file.getframerate()
-            sample_width = wav_file.getsampwidth()
-            frame_count = wav_file.getnframes()
-            if (
-                wav_file.getcomptype() != "NONE"
-                or channels <= 0
-                or sample_rate <= 0
-                or sample_width <= 0
-                or frame_count <= 0
-            ):
-                return False
-            expected_bytes = frame_count * channels * sample_width
-            data = wav_file.readframes(frame_count)
-            return len(data) == expected_bytes
-    except (EOFError, OSError, RuntimeError, wave.Error):
-        return False
+        return os.open(path, flags)
+    except OSError:
+        return None
 
 
 def _resolve_under_allowed_roots(path_value: Any, allowed_roots: tuple[Path, ...]) -> Path | None:
@@ -122,6 +117,19 @@ def clear_delivery_registry() -> None:
 
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
+
+
+def unregister_delivery_url(url_or_token: str | None) -> None:
+    if not url_or_token:
+        return
+    token = url_or_token
+    if token.startswith(f"{DELIVERY_PREFIX}/"):
+        parts = token.split("/")
+        if len(parts) != 4:
+            return
+        token = parts[2]
+    with _REGISTRY_LOCK:
+        _REGISTRY.pop(token, None)
 
 
 def invalidate_delivery_under(root: Path) -> None:
@@ -170,13 +178,21 @@ def register_file_for_delivery(
     ):
         return None
 
+    fd = _open_no_follow(resolved)
+    if fd is None:
+        return None
     try:
-        stat_result = resolved.stat()
-    except OSError:
-        return None
-    if not resolved.is_file() or resolved.is_symlink():
-        return None
-    if Path(neutral_name).suffix.lower() in {".wav", ".wave"} and not _is_valid_pcm_wav(resolved):
+        stat_result = os.fstat(fd)
+        if not resolved.is_file() or resolved.is_symlink():
+            return None
+        kind = media_kind_for_name(neutral_name)
+        media = validate_and_hash_fd(fd, kind=kind)
+        if media is None or media.size != stat_result.st_size:
+            return None
+    finally:
+        os.close(fd)
+
+    if stat_result.st_size <= 0:
         return None
 
     timestamp = time.time() if now is None else now
@@ -197,6 +213,7 @@ def register_file_for_delivery(
             mtime_ns=stat_result.st_mtime_ns,
             inode=stat_result.st_ino,
             device=stat_result.st_dev,
+            digest=media.digest,
             expires_at=timestamp + ttl,
         )
         return _REGISTRY[token].url
@@ -295,41 +312,50 @@ def _parse_request(scope: Mapping[str, Any]) -> tuple[str, str] | None:
     return token, filename
 
 
-def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, int]:
+def _validated_entry(scope: Mapping[str, Any]) -> tuple[DeliveryEntry | None, ValidatedMedia | None, int]:
     parsed = _parse_request(scope)
     if parsed is None:
-        return None, 404
+        return None, None, 404
     token, filename = parsed
     timestamp = time.time()
     with _REGISTRY_LOCK:
         entry = _REGISTRY.get(token)
         if entry is None:
-            return None, 404
+            return None, None, 404
         if entry.expires_at <= timestamp:
             _REGISTRY.pop(token, None)
-            return None, 410
+            return None, None, 410
         if filename != entry.filename:
-            return None, 404
+            return None, None, 404
 
     path = entry.path
+    fd = _open_no_follow(path)
+    if fd is None:
+        with _REGISTRY_LOCK:
+            _REGISTRY.pop(token, None)
+        return None, None, 410
     try:
-        stat_result = path.stat()
-    except OSError:
+        stat_result = os.fstat(fd)
+        kind = media_kind_for_name(entry.filename)
+        media = validate_and_hash_fd(fd, kind=kind)
+        invalid = (
+            media is None
+            or path.is_symlink()
+            or not path.is_file()
+            or stat_result.st_size != entry.size
+            or stat_result.st_mtime_ns != entry.mtime_ns
+            or stat_result.st_ino != entry.inode
+            or stat_result.st_dev != entry.device
+            or media.size != entry.size
+            or media.digest != entry.digest
+        )
+    finally:
+        os.close(fd)
+    if invalid:
         with _REGISTRY_LOCK:
             _REGISTRY.pop(token, None)
-        return None, 410
-    if (
-        path.is_symlink()
-        or not path.is_file()
-        or stat_result.st_size != entry.size
-        or stat_result.st_mtime_ns != entry.mtime_ns
-        or stat_result.st_ino != entry.inode
-        or stat_result.st_dev != entry.device
-    ):
-        with _REGISTRY_LOCK:
-            _REGISTRY.pop(token, None)
-        return None, 410
-    return entry, 200
+        return None, None, 410
+    return entry, media, 200
 
 
 def _range_from_header(range_header: bytes | None, size: int) -> tuple[int, int, int] | None:
@@ -378,7 +404,7 @@ async def send_delivery_response(scope: Mapping[str, Any], send) -> bool:
         await send({"type": "http.response.body", "body": body if method != "HEAD" else b""})
         return True
 
-    entry, miss_status = _validated_entry(scope)
+    entry, media, miss_status = _validated_entry(scope)
     if entry is None:
         body = b"gone" if miss_status == 410 else b"not found"
         status, headers, response_body = _plain_response(miss_status, body)
@@ -395,10 +421,11 @@ async def send_delivery_response(scope: Mapping[str, Any], send) -> bool:
     headers_dict = {
         key.lower(): value for key, value in scope.get("headers", [])
     }
-    parsed_range = _range_from_header(headers_dict.get(b"range"), entry.size)
+    assert media is not None
+    parsed_range = _range_from_header(headers_dict.get(b"range"), media.size)
     if parsed_range is None:
         headers = [
-            (b"content-range", f"bytes */{entry.size}".encode("ascii")),
+            (b"content-range", f"bytes */{media.size}".encode("ascii")),
             (b"content-length", b"0"),
             (b"accept-ranges", b"bytes"),
             (b"cache-control", b"no-store"),
@@ -408,17 +435,15 @@ async def send_delivery_response(scope: Mapping[str, Any], send) -> bool:
         return True
 
     status, start, end = parsed_range
-    length = 0 if entry.size == 0 else end - start + 1
+    length = 0 if media.size == 0 else end - start + 1
     headers = _response_headers(entry, status_size=length)
     if status == 206:
-        headers.append((b"content-range", f"bytes {start}-{end}/{entry.size}".encode("ascii")))
+        headers.append((b"content-range", f"bytes {start}-{end}/{media.size}".encode("ascii")))
     await send({"type": "http.response.start", "status": status, "headers": headers})
     if method == "HEAD":
         body = b""
     else:
-        with entry.path.open("rb") as file:
-            file.seek(start)
-            body = file.read(length)
+        body = media.data[start : end + 1]
     await send({"type": "http.response.body", "body": body, "more_body": False})
     return True
 

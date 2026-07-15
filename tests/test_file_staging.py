@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+import binascii
+import struct
 import unittest
 import wave
+import zlib
 from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote
@@ -55,6 +58,16 @@ def _write_float_wav_header(path: Path) -> None:
         + len(data).to_bytes(4, "little")
         + data
     )
+
+
+def _valid_png_bytes() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = binascii.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 class FileStagingTests(unittest.TestCase):
@@ -368,6 +381,41 @@ class FileStagingTests(unittest.TestCase):
                     self.assertIsNone(staged["original_audio"])
                     self.assertIsNone(staged["mixed_audio"])
                     self.assertIsNone(staged["full_audio"])
+
+    def test_validates_png_visual_roles_before_and_after_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(tmp)
+            valid = root / "valid.png"
+            invalid = root / "invalid.png"
+            valid.write_bytes(_valid_png_bytes())
+            invalid.write_bytes(b"not a png")
+
+            staged = stage_files_for_gradio(
+                {
+                    "spectrogram_image": valid,
+                    "waveform_image": invalid,
+                },
+                allowed_roots=(root,),
+                base_dir=root,
+                staging_root=Path(stage_tmp) / "ui-stage",
+            )
+
+            self.assertIsNotNone(staged["spectrogram_image"])
+            self.assertEqual(Path(staged["spectrogram_image"]).read_bytes(), valid.read_bytes())
+            self.assertIsNone(staged["waveform_image"])
+
+            def corrupting_copy(source, destination):
+                Path(destination).write_bytes(b"corrupt")
+
+            with mock.patch("ui.file_staging.shutil.copyfile", side_effect=corrupting_copy):
+                staged = stage_files_for_gradio(
+                    {"spectrogram_image": valid},
+                    allowed_roots=(root,),
+                    base_dir=root,
+                    staging_root=Path(stage_tmp) / "ui-stage-corrupt",
+                )
+
+            self.assertIsNone(staged["spectrogram_image"])
 
 
 if __name__ == "__main__":

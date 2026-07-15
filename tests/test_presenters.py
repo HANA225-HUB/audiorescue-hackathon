@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import tempfile
+import binascii
 import re
+import struct
 import unittest
 import wave
+import zlib
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote, unquote
 
 from core.schemas import AudioMeta, ProcessResult, ProcessStatus, RuntimeStats
 from ui.file_delivery import clear_delivery_registry, lookup_delivery_entry
+from ui.file_delivery import unregister_delivery_url as _unregister_delivery_url
 from ui.presenters import (
     UI_TUPLE_KEYS,
     cer_markdown,
@@ -54,6 +58,16 @@ def _write_zero_frame_wav(path: Path) -> None:
         wav_file.setframerate(48000)
 
 
+def _valid_png_bytes() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = binascii.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
 def _valid_transcript(text: str = "ok") -> dict[str, object]:
     return {
         "text": text,
@@ -68,8 +82,8 @@ def _valid_transcript(text: str = "ok") -> dict[str, object]:
 def _write_visual_pair(root: Path) -> tuple[str, str]:
     spectrogram = root / "spectrogram.png"
     waveform = root / "waveform.png"
-    spectrogram.write_bytes(b"spectrogram")
-    waveform.write_bytes(b"waveform")
+    spectrogram.write_bytes(_valid_png_bytes())
+    waveform.write_bytes(_valid_png_bytes())
     return str(spectrogram), str(waveform)
 
 
@@ -420,11 +434,11 @@ class PresenterTests(unittest.TestCase):
             full = job_root / "SECRET_USER_full.wav"
             spectrogram = job_root / "SECRET_USER_spectrogram.png"
             waveform = job_root / "SECRET_USER_waveform.png"
-            _write_pcm_wav(original, b"original-content", sample_width=1)
-            _write_pcm_wav(mixed, b"mixed-content", sample_width=1)
-            _write_pcm_wav(full, b"full-content", sample_width=1)
-            spectrogram.write_bytes(b"spectrogram-content")
-            waveform.write_bytes(b"waveform-content")
+            _write_pcm_wav(original, b"\x10\x00\x11\x00")
+            _write_pcm_wav(mixed, b"\x20\x00\x21\x00")
+            _write_pcm_wav(full, b"\x30\x00\x31\x00")
+            spectrogram.write_bytes(_valid_png_bytes())
+            waveform.write_bytes(_valid_png_bytes())
             original_bytes = original.read_bytes()
             mixed_bytes = mixed.read_bytes()
             full_bytes = full.read_bytes()
@@ -466,8 +480,8 @@ class PresenterTests(unittest.TestCase):
                 "enhanced_audio": mixed_bytes,
                 "mixed_download": mixed_bytes,
                 "full_download": full_bytes,
-                "spectrogram_image": b"spectrogram-content",
-                "waveform_image": b"waveform-content",
+                "spectrogram_image": _valid_png_bytes(),
+                "waveform_image": _valid_png_bytes(),
             }
             for key, expected in expected_bytes.items():
                 with self.subTest(key=key):
@@ -684,6 +698,58 @@ class PresenterTests(unittest.TestCase):
                 self.assertNotIn("UI_FILE_DELIVERY_FAILED", view["warnings_html"])
                 _assert_no_sensitive_markers(self, "\n".join(str(value) for value in view.values()))
 
+    def test_malformed_transcript_contract_downgrades_success_to_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            job_root = root / "outputs" / "safe_job"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            _write_pcm_wav(original)
+            _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
+            spectrogram_path, waveform_path = _write_visual_pair(job_root)
+            segment = {"start": 0.0, "end": 0.1, "text": "ok"}
+            cases = {
+                "runtime_string": {**_valid_transcript("after"), "runtime_seconds": "0.1"},
+                "runtime_negative": {**_valid_transcript("after"), "runtime_seconds": -0.1},
+                "runtime_nan": {**_valid_transcript("after"), "runtime_seconds": float("nan")},
+                "runtime_inf": {**_valid_transcript("after"), "runtime_seconds": float("inf")},
+                "runtime_bool": {**_valid_transcript("after"), "runtime_seconds": True},
+                "segment_string": {**_valid_transcript("after"), "segments": [{**segment, "start": "0"}]},
+                "segment_negative": {**_valid_transcript("after"), "segments": [{**segment, "start": -0.1}]},
+                "segment_end_before_start": {
+                    **_valid_transcript("after"),
+                    "segments": [{**segment, "start": 0.2, "end": 0.1}],
+                },
+                "segment_extra_field": {
+                    **_valid_transcript("after"),
+                    "segments": [{**segment, "confidence": 0.9}],
+                },
+                "empty_error_string": {**_valid_transcript("after"), "error": ""},
+            }
+            for name, transcript_after in cases.items():
+                with self.subTest(name=name), mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                    "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+                ):
+                    result = _base_delivery_result(
+                        root,
+                        original_path=str(original),
+                        mixed_path=str(mixed),
+                        spectrogram_path=spectrogram_path,
+                        waveform_path=waveform_path,
+                        transcript_after=transcript_after,
+                    )
+                    original_warnings = result["warnings"]
+                    view = result_to_view(result)
+
+                self.assertEqual(result["status"], "success")
+                self.assertIs(result["warnings"], original_warnings)
+                self.assertEqual(result["warnings"], [])
+                self.assertIn("data-status='partial'", view["status_md"])
+                self.assertIn("UI_RESULT_INCOMPLETE", view["warnings_html"])
+                self.assertIn("transcript_missing", view["warnings_html"])
+
     def test_visual_registration_failure_downgrades_success_to_partial(self) -> None:
         with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
             root = Path(root_tmp)
@@ -722,6 +788,56 @@ class PresenterTests(unittest.TestCase):
         self.assertIn("data-status='partial'", view["status_md"])
         self.assertIn("UI_RESULT_INCOMPLETE", view["warnings_html"])
         self.assertIn("visual_delivery_failed", view["warnings_html"])
+
+    def test_invalid_visual_effective_url_is_cleared_and_token_unregistered(self) -> None:
+        with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
+            root = Path(root_tmp)
+            staging_root = Path(stage_tmp) / "ui-stage"
+            job_root = root / "outputs" / "safe_job"
+            job_root.mkdir(parents=True)
+            original = job_root / "original.wav"
+            mixed = job_root / "mixed.wav"
+            spectrogram = job_root / "spectrogram.png"
+            waveform = job_root / "waveform.png"
+            _write_pcm_wav(original)
+            _write_pcm_wav(mixed, b"\x02\x00\x03\x00")
+            spectrogram.write_bytes(_valid_png_bytes())
+            waveform.write_bytes(_valid_png_bytes())
+            result = _base_delivery_result(
+                root,
+                original_path=str(original),
+                mixed_path=str(mixed),
+                spectrogram_path=str(spectrogram),
+                waveform_path=str(waveform),
+            )
+
+            def validate_with_invalid_waveform(path: Path, *, kind: str | None) -> bool:
+                if path.name == "waveform.png":
+                    return False
+                from ui.media_validation import validate_media_path
+
+                return validate_media_path(path, kind=kind)
+
+            with mock.patch("ui.presenters.ROOT_DIR", root), mock.patch.dict(
+                "os.environ", {"AUDIORESCUE_UI_STAGING_DIR": str(staging_root)}
+            ), mock.patch(
+                "ui.presenters.validate_media_path",
+                side_effect=validate_with_invalid_waveform,
+            ), mock.patch(
+                "ui.presenters.unregister_delivery_url",
+                wraps=_unregister_delivery_url,
+            ) as unregister:
+                view = result_to_view(result)
+
+        self.assertIn("data-status='partial'", view["status_md"])
+        self.assertIn("UI_RESULT_INCOMPLETE", view["warnings_html"])
+        self.assertIn("UI_MEDIA_INVALID", view["warnings_html"])
+        self.assertIn("未生成", view["waveform_image"])
+        self.assertEqual(_delivery_urls(view["waveform_image"]), [])
+        unregister.assert_called()
+        removed_url = unregister.call_args.args[0]
+        self.assertTrue(str(removed_url).endswith("/waveform.png"))
+        self.assertIsNone(lookup_delivery_entry(str(removed_url)))
 
     def test_failed_core_status_is_never_upgraded_by_available_files(self) -> None:
         with tempfile.TemporaryDirectory() as root_tmp, tempfile.TemporaryDirectory() as stage_tmp:
@@ -830,9 +946,9 @@ class PresenterTests(unittest.TestCase):
                 original = job_root / source_name
                 mixed = job_root / f"SECRET_USER_mix_{index:02d}.wav"
                 full = job_root / f"SECRET_USER_full_{index:02d}.wav"
-                _write_pcm_wav(original, f"original-{index}".encode("ascii"), sample_width=1)
-                _write_pcm_wav(mixed, f"mixed-{index}".encode("ascii"), sample_width=1)
-                _write_pcm_wav(full, f"full-{index}".encode("ascii"), sample_width=1)
+                _write_pcm_wav(original, index.to_bytes(2, "little") * 2)
+                _write_pcm_wav(mixed, (index + 1).to_bytes(2, "little") * 2)
+                _write_pcm_wav(full, (index + 2).to_bytes(2, "little") * 2)
                 result = {
                     "job_id": "safe_job",
                     "status": "success",
