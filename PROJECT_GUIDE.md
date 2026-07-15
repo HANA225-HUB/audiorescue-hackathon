@@ -1,38 +1,70 @@
-# PROJECT_GUIDE
+# AudioRescue 项目指南
 
-## 范围
+## 1. 项目目标
 
-P0 只做离线短音频标准化、DeepFilterNet、双轨 Whisper、A/B、可视化和文本差异。CLAP、实时流式、训练模型、账号系统和移动端不进入 P0。
+AudioRescue 是一个本地优先的音频修复与转写演示系统。公开仓库只描述可复现的软件契约、合成夹具和离线演示流程，不保存真实素材、参考正文、成员映射或本机环境信息。
 
-## 协作规则
+核心链路：
 
-1. `main` 始终保持可运行；成员在自己的功能分支开发。
-2. 同一时刻只有一个人和一个 AI 写同一个文件。
-3. 公共契约变更必须先由 C 修改 `core/schemas.py` 和契约文档，再通知 A/B。
-4. 每个提交只解决一个可验收问题。
-5. 不提交模型、缓存、完整数据集、用户私密音频、日志或 `outputs/`。
-6. 不把参考文本传入 Whisper prompt。
-7. 不手改 Whisper 输出后再计算 CER。
-8. A/B 功能分支以 C 当日公布的 `origin/codex/c-integration` 提交为基线；已开工后不要强制改写历史，合入冲突交给 C 处理。
-9. `locked_test` 只允许在冻结记录通过完整性校验后正式运行一次；崩溃也会留下消费回执，不删除回执重跑。
+1. 校验并标准化输入音频。
+2. 生成完整增强轨与可调混合轨。
+3. 对处理前后音频分别转写。
+4. 生成波形、频谱、文本差异与安全状态摘要。
+5. 通过不透明的本地交付地址向界面提供产物。
 
-## 文件所有权
+## 2. 仓库导航
 
-- A：`core/audio_io.py`、`core/enhance.py`、`core/transcribe.py`、相应单元测试。
-- B：`app.py`、`ui/`、`core/visualize.py`、`core/text_diff.py`、相应单元测试。
-- C：`core/schemas.py`、`core/pipeline.py`、`core/metrics.py`、`core/cache.py`、`core/events.py`、`scripts/` 数据与评测工具、配置、文档和集成测试。
+- [README](README.md)：快速开始与当前边界。
+- [后端公开契约](docs/A_BACKEND_CONTRACT_V1.md)：函数、schema 与失败语义。
+- [离线演示手册](docs/OFFLINE_DEMO_RUNBOOK.md)：准备、启动、降级与清理。
+- [团队技术手册](docs/handbook/README.md)：角色分工与验收纪律。
+- [测试报告](TEST_REPORT.md)：当前可公开复现的测试证据。
 
-## 本地数据边界
+## 3. 本地准备
 
-- 原始录音母带只放在 `data_local/source_original/`，统一 WAV 放在 `data_local/raw/`；两者都不提交 Git。
-- 公开仓库只允许提交已声明授权的演示音频或合成测试音频；完整数据、参考文本、冻结集、模型和运行输出不得提交。
-- 开发只使用 `dev` 和合成联调样例；`locked_test` 在最终代码、配置、manifest、授权与 Git 提交冻结前不可访问。
-- 录音者授权或公开数据许可证记录在私有 manifest/台账；无法确认授权的素材不进入演示和评测。
+使用受支持的 Python 版本创建独立环境，并只从仓库固定依赖文件安装：
 
-## 当前冻结
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+```
 
-- 契约版本：`v0.1-contract`
-- 配置文件：`configs/app.yaml`
-- A 接口：`docs/A_BACKEND_CONTRACT_V1.md`
-- 默认增强试听与 After ASR：`enhanced_mix.wav`
-- `enhanced_full.wav`：100% 增强调试/下载轨
+FFmpeg 和模型资产必须在演示前由负责人完成准备与验证。演示现场不下载模型、不升级依赖、不切换环境。
+
+## 4. 验证
+
+轻量回归：
+
+```bash
+python3 -m unittest -v tests.test_repo_safety
+python3 -m unittest discover -s tests -p 'test_*.py'
+git diff --check
+```
+
+真实模型 smoke、人工听测和用户样本验收是独立门禁。它们的原始输出、路径和素材信息只进入未跟踪的本地私有台账；公开报告只保留版本、指纹前缀、耗时、通过状态和脱敏问题摘要。
+
+## 5. 协作规则
+
+- A 负责增强、转写与音频契约。
+- B 负责界面、展示与本地文件交付。
+- C 负责公共 schema、集成、冻结、证据审查和合并决策。
+- 每个任务必须写明目标角色、允许文件、验收命令和禁止项。
+- 未经授权不得扩大文件范围，不得自动合并或改写远端历史。
+- 任何隐私、安全或契约问题都应 fail-closed，并以固定、脱敏的状态上报。
+
+## 6. 公开与私有边界
+
+公开仓库允许：
+
+- 代码、公开契约和中性 synthetic 示例；
+- 不含原始内容的统计与测试状态；
+- 可复现的离线启动、回滚和清理说明。
+
+公开仓库禁止：
+
+- 真实录音、转写正文、参考正文或内部评测结构；
+- 绝对路径、模型位置、缓存布局、账号、凭据或网络端点；
+- 未经批准的运行日志、完整异常文本或可逆编码。
+
+发现边界问题时，先停止发布与合并，再修复当前树；历史处理必须由用户单独授权。
