@@ -271,6 +271,29 @@ class RepositorySafetyTest(unittest.TestCase):
         for suffix in PRIVATE_AUDIO_SUFFIXES - {".wav"}:
             self.assertIn(f"*{suffix}", ignore_lines)
 
+    def test_ignore_rules_do_not_hide_tracked_public_sources_or_example_spec(self) -> None:
+        public_paths = [
+            "configs/dataset_spec.example.json",
+            "scripts/dataset_spec.py",
+            "scripts/init_dataset.py",
+            "scripts/build_dataset.py",
+            "scripts/validate_dataset.py",
+            "scripts/run_evaluation.py",
+            "tests/test_dataset_spec.py",
+            "tests/test_init_dataset.py",
+            "tests/test_build_dataset.py",
+            "tests/test_validate_dataset.py",
+            "tests/test_run_evaluation.py",
+        ]
+        for public_path in public_paths:
+            with self.subTest(public_path=public_path):
+                result = subprocess.run(
+                    ["git", "check-ignore", "-q", "--", public_path],
+                    cwd=PROJECT_ROOT,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

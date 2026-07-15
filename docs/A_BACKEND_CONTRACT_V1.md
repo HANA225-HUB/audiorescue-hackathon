@@ -1,14 +1,13 @@
-# A 音频后端冻结契约 v0.1
+# A Backend Contract V1
 
-> 冻结时间：2026-07-14
-> 所有者：C
-> 适用模块：`core/audio_io.py`、`core/enhance.py`、`core/transcribe.py`
+> Owner: C integration layer
+> Applies to: `core/audio_io.py`, `core/enhance.py`, `core/transcribe.py`, `core/pipeline.py`
 
-这是今天首次生成的实际代码契约，不是声称此前已经存在。冻结文件为 `core/schemas.py`；如需变更，A 提交建议，由 C 修改后同步 A/B。
+This document records the public A-layer runtime contract. It intentionally uses neutral dataset examples only. Runtime schemas remain defined by `core/schemas.py`; schema changes must be reviewed through the integration owner before A/B code depends on them.
 
-## 1. 公共 schema
+## 1. Public Schemas
 
-A 只能从 `core.schemas` 导入：
+A-facing code may import these public schema and exception types from `core.schemas`:
 
 ```text
 AudioLevelMetrics
@@ -25,17 +24,16 @@ OutputValidationError
 ASRInferenceError
 ```
 
-可空字段：
+Nullable fields:
 
-- `AudioMeta.rms_dbfs`、`silent_ratio`：无法可靠计算时可为 `None`；
-- `AudioMeta.original_sample_rate`、`original_channels`、`source_format`：源信息不可取得时可为 `None`；
-- `TranscriptResult.language`：Whisper 未返回时可为 `None`；
-- `TranscriptResult.error`：成功或空文本时必须为 `None`；真正失败抛 `ASRInferenceError`；
-- `ProcessResult` 中某阶段未产生的结果路径、转写、CER、图像均可为 `None`；
-- `ProcessResult.original_levels` 与 `mixed_levels` 在对应轨道未生成或未完成体检时可为 `None`；
-- `events`、`warnings`、`config_snapshot` 永不为 `None`，没有内容时为空集合。
+- `AudioMeta.rms_dbfs` and `silent_ratio` may be `None` when they cannot be computed reliably.
+- `AudioMeta.original_sample_rate`, `original_channels`, and `source_format` may be `None` when source metadata is unavailable.
+- `TranscriptResult.language` may be `None` when the ASR backend does not report it.
+- `TranscriptResult.error` must be `None` for successful or valid empty transcripts; real ASR failures raise `ASRInferenceError`.
+- `ProcessResult` fields for paths, transcripts, CER, figures, and level metrics may be `None` when that stage did not run or did not complete.
+- `events`, `warnings`, and `config_snapshot` are never `None`; they are empty collections when there is nothing to report.
 
-## 2. A 层最终函数签名
+## 2. A-Layer Function Signatures
 
 ```python
 def normalize_audio(
@@ -78,7 +76,7 @@ def transcribe_audio(
     ...
 ```
 
-`EnhancementOutput` 固定包含：
+`EnhancementOutput` contains:
 
 ```text
 full_output_path
@@ -89,17 +87,17 @@ model_name
 warnings: list[WarningItem]
 ```
 
-`TranscriptResult.segments` 只返回可 JSON 序列化的：
+`TranscriptResult.segments` must be strict JSON data:
 
 ```json
-[{"start": 0.0, "end": 2.4, "text": "大家好"}]
+[{"start": 0.0, "end": 2.4, "text": "neutral transcript text"}]
 ```
 
-不得返回 Whisper 内部对象、Tensor 或模型对象。
+Do not return backend objects, tensors, model instances, or any object that cannot be serialized with strict JSON rules.
 
-## 3. 输出目录责任
+## 3. Output Directory Contract
 
-确认由 C 的 pipeline 创建：
+The pipeline creates the job directory and owns the final result files:
 
 ```text
 outputs/{job_id}/
@@ -114,99 +112,93 @@ outputs/{job_id}/
 └── run.log
 ```
 
-A 只按 pipeline 传入的绝对路径写：
+A writes only the paths passed by the pipeline:
 
-- `original.wav`；
-- `enhanced_full.wav`；
-- `enhanced_mix.wav`。
+- `original.wav`
+- `enhanced_full.wav`
+- `enhanced_mix.wav`
 
-A 不创建 `job_id`，不改文件名，不写 `result.json`。为健壮性可创建目标文件的 parent，但不得改变目录结构。写失败时不能覆盖源文件或生成伪成功空文件。
+A does not choose the `job_id`, rename output files, or write `result.json`. It may create parent directories for the exact target paths, but it must not alter the directory layout. A write failure must not overwrite source audio or create an empty success artifact.
 
-## 4. 错误码、异常与状态
+## 4. Errors, Warnings, And Status
 
-| 情况 | A 的行为 | pipeline 警告码 | 最终状态 |
+| Situation | A behavior | Pipeline warning code | Final status |
 |---|---|---|---|
-| 缺文件、空文件、不可解码、时长为0 | 抛 `InputAudioError` | `INPUT_INVALID` | `failed` |
-| 时长超过60秒 | 抛 `InputTooLongError`，不静默截断 | `INPUT_TOO_LONG` | `failed` |
-| 输入削波 | 返回结果并附 `INPUT_CLIPPED` | 同码 | 不单独降级 |
-| 输入近静音 | 返回结果并附 `INPUT_NEAR_SILENT` | 同码 | 不单独降级；ASR空时再变 `partial` |
-| 发生重采样/下混 | 返回结果并记录源属性 | `INPUT_RESAMPLED` / `INPUT_STEREO_DOWNMIXED` | 不降级 |
-| DeepFilterNet 失败 | 抛 `EnhancementError` | `ENHANCE_FAILED` | `failed` |
-| full/mixed 空、NaN、不可播放 | 抛 `OutputValidationError` | `OUTPUT_INVALID` | `failed` |
-| ASR 推理失败 | 抛 `ASRInferenceError` | pipeline 按调用位置映射 Before/After | `partial`，前提是增强成功 |
-| ASR 合法返回空文本 | 返回 `text=""`、`error=None` | `ASR_EMPTY` | `partial` |
-| 可视化失败 | A 不处理 | `VIS_FAILED` | `partial` |
-| CLAP 正常关闭 | A 不处理 | 无 | 不影响 P0 |
-| CLAP 开启后失败 | A 不处理 | `EVENTS_SKIPPED` | 不影响 P0 |
-| 缓存命中 | A 不处理 | `CACHE_USED` | 保留缓存中的原状态 |
+| Missing, empty, undecodable, or zero-duration input | Raise `InputAudioError` | `INPUT_INVALID` | `failed` |
+| Input longer than the configured maximum | Raise `InputTooLongError`; do not truncate silently | `INPUT_TOO_LONG` | `failed` |
+| Clipped input | Return metadata with `INPUT_CLIPPED` warning | `INPUT_CLIPPED` | not downgraded by itself |
+| Near-silent input | Return metadata with `INPUT_NEAR_SILENT` warning | `INPUT_NEAR_SILENT` | not downgraded by itself; empty ASR may later make it `partial` |
+| Resample or downmix occurred | Return source metadata and warning | `INPUT_RESAMPLED` / `INPUT_STEREO_DOWNMIXED` | not downgraded |
+| Enhancement backend failure | Raise `EnhancementError` | `ENHANCE_FAILED` | `failed` |
+| Enhanced output empty, invalid, NaN, or unreadable | Raise `OutputValidationError` | `OUTPUT_INVALID` | `failed` |
+| ASR inference failure | Raise `ASRInferenceError` | pipeline maps before/after failure | `partial` if enhancement succeeded |
+| ASR returns valid empty text | Return `text=""`, `error=None` | `ASR_EMPTY` | `partial` |
+| Visualization failure | A does not handle it | `VIS_FAILED` | `partial` |
+| Event tagging disabled | A does not handle it | none | no effect |
+| Event tagging enabled but failed | A does not handle it | `EVENTS_SKIPPED` | no effect on P0 |
+| Cache hit | A does not handle it | `CACHE_USED` | preserve cached status |
 
-额外规则：
+Additional rules:
 
-- 原轨与增强轨 ASR 互不依赖；一路失败不能取消另一路；
-- 增强失败时 pipeline 可以保留原轨与原轨转写，但不得伪造增强轨，状态仍是 `failed`；
-- A 不把 traceback 写入面向用户的 message，完整异常只进入本地日志；
-- `ASRInferenceError` 不知道 before/after，pipeline 根据调用位置映射为 `ASR_BEFORE_FAILED` 或 `ASR_AFTER_FAILED`。
+- Before and after ASR are independent. Failure on one side must not cancel the other side.
+- If enhancement fails, the pipeline may preserve original-track outputs, but it must not fabricate enhanced-track success.
+- User-facing messages must not include tracebacks. Full exception details belong only in local logs.
+- `ASRInferenceError` is stage-agnostic; the pipeline maps it to the before or after warning code according to call site.
 
-## 5. 冻结配置
+## 5. Frozen Runtime Configuration
 
-最终以 `configs/app.yaml` 为准：
+The public runtime configuration is defined by `configs/app.yaml`.
 
-| 项目 | v0.1 值 |
+| Item | V1 contract |
 |---|---|
-| 规范化 | WAV、48kHz、单声道、PCM16 |
-| 输入时长 | 1–60秒；主演示10–15秒 |
-| DeepFilterNet | DeepFilterNet3 |
-| dry/wet | `mixed=(1-strength)*original+strength*enhanced` |
-| 默认 strength | `0.75` |
-| Whisper | 多语言 `base` |
-| 语言/任务 | `zh` / `transcribe` |
-| 设备 | `auto`；4090服务器解析为 `cuda`，本地无CUDA时为 `cpu` |
-| 解码 | `temperature=0`、`condition_on_previous_text=false`、无 `initial_prompt` |
-| 并发 | 1 |
+| Normalized audio | WAV, 48 kHz, mono, PCM16 |
+| Input duration | 1-60 seconds by default |
+| Enhancement backend | DeepFilterNet3-compatible enhancer |
+| Default dry/wet | `mixed=(1-strength)*original+strength*enhanced` |
+| Default strength | `0.75` |
+| ASR model class | multilingual Whisper-compatible model |
+| ASR language/task | `zh` / `transcribe` |
+| Device selection | `auto`; runtime resolves to an available supported device |
+| Decode policy | `temperature=0`, `condition_on_previous_text=false`, no `initial_prompt` |
+| Concurrency | 1 |
 
-原轨和增强轨必须使用同一模型、语言、设备类型和解码参数。参考台词只能进入 C 的 CER 模块，禁止进入 Whisper prompt。
+Original and enhanced tracks must use the same ASR model, language, device policy, and decoding settings. Reference text is only allowed in the CER computation layer after ASR output exists; it must never become an ASR prompt or model-facing hint.
 
-## 6. A/B 响度公平与默认播放
+## 6. A/B Loudness And Playback Fairness
 
-P0 不在 A 的模型输出上做额外响度 DSP，也不引入临时 LUFS 依赖。冻结规则：
+P0 does not add loudness DSP to make one side sound better. The frozen rules are:
 
-1. `original.wav`、`enhanced_full.wav`、`enhanced_mix.wav` 保持可审计；
-2. 两个播放器使用相同播放器音量和同一系统音量；
-3. 结果同时报告两轨 `rms_dbfs` 和 `peak_abs`；
-4. 三人做盲听，不能把“更响”当“更清晰”；
-5. 默认页面播放和 After ASR 均使用 `enhanced_mix.wav`；
-6. `enhanced_full.wav` 仅作100%增强调试与下载；
-7. `ProcessResult.enhanced_audio_path` 是兼容别名，永远等于 `mixed_output_path`。
+1. Keep `original.wav`, `enhanced_full.wav`, and `enhanced_mix.wav` audit-ready.
+2. Use the same player volume and system volume for both A/B sides.
+3. Report both tracks' `rms_dbfs` and `peak_abs`.
+4. Blind listening must not treat "louder" as "clearer" without evidence.
+5. The page's default after-audio playback and after-ASR use `enhanced_mix.wav`.
+6. `enhanced_full.wav` is for full-strength debugging and download.
+7. `ProcessResult.enhanced_audio_path` is a compatibility alias for `mixed_output_path`.
 
-响度证据的公共结构为：
+Public loudness evidence:
 
 ```python
 AudioLevelMetrics(
-    peak_abs: float,        # 必须有限，范围 0.0..1.0
-    rms_dbfs: float | None, # 非静音时必须有限；数字静音使用 None
+    peak_abs: float,        # finite, 0.0..1.0
+    rms_dbfs: float | None, # finite when non-silent; None for digital silence
 )
 ```
 
-`ProcessResult.original_levels` 严格对应 `original_audio_path`，
-`ProcessResult.mixed_levels` 严格对应 `mixed_output_path`。两者是为了证明 A/B
-没有靠放大音量制造效果，不是新的音频处理步骤。旧的 `ProcessResult(...)`
-构造调用不传这两个字段仍合法，默认值均为 `None`。不得用 `NaN`、
-`Infinity` 或 `-Infinity` 代表静音。
+`ProcessResult.original_levels` corresponds to `original_audio_path`; `ProcessResult.mixed_levels` corresponds to `mixed_output_path`. Do not use `NaN`, `Infinity`, or `-Infinity` to represent silence.
 
-以后若加入 LUFS，只能生成新的播放副本，不覆盖上述三条标准轨，并需升级契约版本。
+If LUFS is added later, it must create a new derived playback copy rather than overwrite the three standard tracks, and the contract version must be updated.
 
-## 7. 缓存责任
+## 7. Cache Responsibility
 
-确认：
+- `core/cache.py` owns job-result caching, cache keys, cache-hit display, and invalidation.
+- A owns only process-local enhancer/ASR model singletons and official backend weight caches.
+- A does not cache `ProcessResult` and must not bypass processing based on filenames.
+- A changed input hash, strength, model, language, code version, or config version must invalidate old results.
 
-- C 的 `core/cache.py` 负责任务结果缓存、缓存键、命中显示和失效；
-- A 只负责进程内 enhancer/ASR 模型单例以及官方权重的本地缓存；
-- A 不缓存 `ProcessResult`，不根据文件名绕过真实处理；
-- 改变输入哈希、strength、模型、语言或代码/配置版本后不能误用旧结果。
+## 8. Runtime Timing Fields
 
-## 8. 耗时字段与冷启动
-
-公共字段在 `RuntimeStats`：
+`RuntimeStats` reports:
 
 ```text
 decode_seconds
@@ -224,36 +216,30 @@ cold_start
 device
 ```
 
-口径：
+Timing definitions:
 
-- `enhance_audio.runtime_seconds` 只计本次增强调用，不含模型加载；
-- `TranscriptResult.runtime_seconds` 只计该轨音频加载、特征和解码，不含模型加载；
-- 若模型在应用启动时预热，任务内 load 字段为0，`cold_start=false`；
-- 若首次请求中懒加载，实际加载写入 load 字段，`cold_start=true`；
-- `total_seconds` 从 `process_audio()` 入口到 `result.json` 持久化完成，包含本次请求内实际发生的模型加载；
-- 测试报告分别记录一次冷启动和至少三次热运行，页面主数字使用热运行中位数并注明条件。
+- `enhance_audio.runtime_seconds` measures only the enhancement call, not model loading.
+- `TranscriptResult.runtime_seconds` measures that track's audio preparation and decode, not model loading.
+- If models are preloaded before a job, job-level load fields are zero and `cold_start=false`.
+- If the first request lazy-loads models, load time is recorded and `cold_start=true`.
+- `total_seconds` covers `process_audio()` entry through durable `result.json` persistence, including model load that happens inside the request.
+- Reports should distinguish cold-start and warm-run timings; user-facing headline numbers should identify the condition used.
 
-## 9. 首次联调样例
+## 9. Public Fixture And Local Dataset Roles
 
-立即可用的仓库内样例：
+The repository fixture under `tests/fixtures/` is synthetic and contains no private speech or reference transcript. It is suitable for decode, enhancement, output-layout, structured-error, and cache checks. It is not CER evidence.
 
-```text
-tests/fixtures/dev_smoke_s01_fan.wav
-```
-
-它是纯数学啁啾信号加固定种子的风扇状噪声，不含人声，只用于验证解码、增强、输出路径和错误处理；不能作为 Whisper 文本或 CER 证据。双路 ASR 首次联调改用 `data_local` 内已授权的 S01/S02 中文录音，真实录音不得提交 GitHub。
-
-该公开 fixture 没有参考文本。
-
-正式 dev 样例生成后固定为：
+For local dataset work, use an ignored root and an explicit local spec:
 
 ```text
-data_local/controlled/dev/mix_spkA_s01_fan_snr000.wav
+data_local/controlled/dev/sample_mix_1.wav
+data_local/raw/clean/speaker_1/sample_clean_1.wav
+data_local/raw/noise/noise_class_1.wav
 ```
 
-`S03` 属于 `locked_test`，配置冻结前不发给 A/B 调参。
+Protected or holdout-style splits remain unavailable for tuning until code, config, manifest, authorization, dataset spec, and commit state are frozen. Public documentation must describe roles and fields, not private member mappings, exact private counts, candidate IDs, server paths, transcripts, or local absolute paths.
 
-首次预期输出：
+Expected core artifacts remain:
 
 ```text
 outputs/{job_id}/original.wav
@@ -261,8 +247,8 @@ outputs/{job_id}/enhanced_full.wav
 outputs/{job_id}/enhanced_mix.wav
 ```
 
-验收只要求三条文件可读取、48kHz/mono/PCM16、时长合理、无 NaN/Inf、增强不覆盖原轨；转写是否改善不作为合成 fixture 的验收条件。
+Acceptance checks require readable WAV files, 48 kHz mono PCM16, finite metadata, structured errors, and no leakage of local private paths, reference text, credentials, model cache paths, or transcript contents beyond intended transcript fields.
 
-## 10. CLAP P1
+## 10. Event Tagging Boundary
 
-确认：A 只向 pipeline 提供标准化 `original.wav` 路径和 `AudioMeta`。`core/events.py` 只读原轨，不修改标准化、增强或 ASR 主链路。CLAP 正常关闭时不产生警告；只有显式开启后失败才追加 `EVENTS_SKIPPED`。
+A provides the normalized `original.wav` path and `AudioMeta` to the pipeline. Event-tagging code reads the original track and does not modify normalization, enhancement, ASR, or CER behavior. When event tagging is disabled, it produces no warning; when explicitly enabled and unavailable, the pipeline appends `EVENTS_SKIPPED`.

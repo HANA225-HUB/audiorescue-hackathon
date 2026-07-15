@@ -21,6 +21,11 @@ venv/
 
 # AudioRescue local data and generated artifacts
 data_local/
+configs/dataset_spec.local*.json
+configs/*private*dataset*spec*.json
+configs/*dataset*spec*private*.json
+dataset_spec.local*.json
+dataset_spec.private*.json
 models/
 weights/
 .cache/

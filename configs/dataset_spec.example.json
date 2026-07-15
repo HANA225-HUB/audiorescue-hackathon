@@ -1,0 +1,85 @@
+{
+  "dataset_version": "audiorescue-synthetic-template-v1",
+  "sample_rate": 48000,
+  "channels": 1,
+  "sample_width_bytes": 2,
+  "protected_splits": [
+    "holdout",
+    "clean_control"
+  ],
+  "consent_tokens": {
+    "pending": "pending_local_authorization",
+    "approved": "approved_for_evaluation"
+  },
+  "clean_recordings": [
+    {
+      "id": "clean_1",
+      "speaker_id": "speaker_1",
+      "sentence_id": "sentence_1",
+      "reference_text": "synthetic reference one",
+      "path": "raw/clean/speaker_1/sample_clean_1.wav",
+      "split": "dev"
+    },
+    {
+      "id": "clean_2",
+      "speaker_id": "speaker_2",
+      "sentence_id": "sentence_2",
+      "reference_text": "synthetic reference two",
+      "path": "raw/clean/speaker_2/sample_clean_2.wav",
+      "split": "holdout"
+    }
+  ],
+  "noise_recordings": [
+    {
+      "id": "noise_1",
+      "noise_type": "noise_class_1",
+      "path": "raw/noise/noise_class_1.wav"
+    }
+  ],
+  "mixes": [
+    {
+      "sample_id": "sample_mix_1",
+      "clean_id": "clean_1",
+      "noise_id": "noise_1",
+      "split": "dev",
+      "snr_db": 0,
+      "snr_label": "snr000",
+      "path": "controlled/dev/sample_mix_1.wav",
+      "is_locked": false,
+      "is_demo_candidate": true
+    },
+    {
+      "sample_id": "sample_mix_2",
+      "clean_id": "clean_2",
+      "noise_id": "noise_1",
+      "split": "holdout",
+      "snr_db": -3,
+      "snr_label": "snrm03",
+      "path": "controlled/holdout/sample_mix_2.wav",
+      "is_locked": true,
+      "is_demo_candidate": false
+    }
+  ],
+  "clean_controls": [
+    {
+      "sample_id": "sample_clean_control_1",
+      "clean_id": "clean_1",
+      "split": "clean_control",
+      "is_locked": true,
+      "is_demo_candidate": false
+    }
+  ],
+  "real_recordings": [
+    {
+      "sample_id": "sample_real_1",
+      "speaker_id": "speaker_2",
+      "sentence_id": "sentence_2",
+      "reference_text": "synthetic real reference",
+      "noise_type": "noise_class_1",
+      "path": "raw/real/sample_real_1.wav",
+      "split": "real",
+      "is_locked": false,
+      "is_demo_candidate": false
+    }
+  ]
+}

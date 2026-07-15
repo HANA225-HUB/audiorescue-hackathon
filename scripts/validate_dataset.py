@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the frozen AudioRescue-CN-Mini-v1 recording dataset.
-
-The validator intentionally uses only the Python standard library so it can be
-run on the recording laptop before the model environment is installed.
-"""
+"""Validate a generic AudioRescue recording dataset and manifest."""
 
 from __future__ import annotations
 
@@ -18,73 +14,23 @@ import wave
 from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
-
-DATASET_VERSION = "AudioRescue-CN-Mini-v1"
-PENDING_CONSENT_TOKEN = "pending_team_confirmation"
-APPROVED_CONSENT_TOKEN = "team-approved-for-competition-evaluation"
-SPEAKERS = ("A", "B", "C")
-SENTENCES = ("s01", "s02", "s03")
-REFERENCE_TEXTS = {
-    "s01": "今天下午三点，我们在实验室讨论语音处理项目的最终方案。",
-    "s02": "请记录会议中的三个重点：数据来源、模型效果和系统稳定性。",
-    "s03": "如果现场网络中断，系统仍然可以在本地完成音频增强和文字转写。",
-}
-SNR_CODES = {"snrp05": 5.0, "snr000": 0.0, "snrm05": -5.0}
-NOISE_ASSIGNMENT = {
-    ("A", "s01"): "fan",
-    ("A", "s02"): "keyboard",
-    ("A", "s03"): "traffic",
-    ("B", "s01"): "keyboard",
-    ("B", "s02"): "traffic",
-    ("B", "s03"): "fan",
-    ("C", "s01"): "traffic",
-    ("C", "s02"): "fan",
-    ("C", "s03"): "keyboard",
-}
-REAL_ASSIGNMENT = {
-    "A": ("s03", "traffic"),
-    "B": ("s01", "fan"),
-    "C": ("s02", "keyboard"),
-}
-DEMO_SAMPLE_IDS = {
-    "mix_spkB_s03_fan_snr000",
-    "mix_spkC_s03_keyboard_snrm05",
-    "clean_spkA_s03",
-    "real_spkA_traffic_r01",
-}
-
-MANIFEST_FIELDS = (
-    "sample_id",
-    "dataset_version",
-    "split",
-    "speaker_id",
-    "sentence_id",
-    "reference_text",
-    "reference_normalized",
-    "source_type",
-    "clean_path",
-    "noise_path",
-    "mixed_path",
-    "noise_type",
-    "noise_source",
-    "consent_or_license",
-    "snr_db",
-    "mix_seed",
-    "noise_offset_seconds",
-    "mix_alpha",
-    "final_gain",
-    "sample_rate",
-    "channels",
-    "duration_seconds",
-    "recording_device",
-    "recording_distance_cm",
-    "sha256",
-    "is_demo_candidate",
-    "is_locked",
-    "notes",
+from scripts.dataset_spec import (
+    DEFAULT_APPROVED_CONSENT_TOKEN,
+    DEFAULT_PENDING_CONSENT_TOKEN,
+    DatasetSpec,
+    DatasetSpecError,
+    load_dataset_spec,
+    root_relative_label,
+    safe_join,
 )
+from scripts.build_dataset import MANIFEST_FIELDS
+
+
+DATASET_VERSION = "audiorescue-synthetic-template-v1"
+PENDING_CONSENT_TOKEN = DEFAULT_PENDING_CONSENT_TOKEN
+APPROVED_CONSENT_TOKEN = DEFAULT_APPROVED_CONSENT_TOKEN
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _INTEGER_RE = re.compile(r"^[+-]?\d+$")
@@ -99,7 +45,7 @@ class ValidationPolicy:
     sample_width_bytes: int = 2
     audio_min_seconds: float = 1.0
     audio_max_seconds: float = 60.0
-    noise_min_seconds: float = 45.0
+    noise_min_seconds: float = 1.0
     noise_max_seconds: float = 60.0
     near_silence_dbfs: float = -60.0
     mixed_peak_limit: float = 0.981
@@ -117,7 +63,9 @@ class ArtifactSpec:
     sentence: str | None = None
     noise: str | None = None
     snr_code: str | None = None
+    snr_db: float | None = None
     split: str | None = None
+    sample_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,13 +110,23 @@ class ValidationReport:
         return not self.errors
 
     def add(self, severity: str, code: str, path: str | Path, message: str) -> None:
-        self.issues.append(ValidationIssue(severity, code, str(path), message))
+        if isinstance(path, Path):
+            label = root_relative_label(self.root, path)
+        else:
+            label = str(path)
+            root_text = str(self.root)
+            root_posix = self.root.as_posix()
+            if root_text and root_text in label:
+                label = label.replace(root_text, "<dataset_root>")
+            if root_posix and root_posix in label:
+                label = label.replace(root_posix, "<dataset_root>")
+        self.issues.append(ValidationIssue(severity, code, label, message))
 
     def render(self) -> str:
         state = "PASS" if self.ok else "FAIL"
         lines = [
             f"AudioRescue dataset validation: {state}",
-            f"Root: {self.root}",
+            "Root: <dataset_root>",
             f"Required WAVs checked: {self.checked_wavs}/{self.expected_wavs}",
             f"Manifest rows: {self.manifest_rows}",
             f"SHA-256 values verified: {self.hashes_verified}",
@@ -181,67 +139,144 @@ class ValidationReport:
         return "\n".join(lines)
 
 
-def expected_dataset_artifacts() -> dict[Path, ArtifactSpec]:
-    """Return the frozen 9 clean + 3 noise + 27 mix + 3 real matrix."""
+def normalize_reference(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    return "".join(character for character in normalized if character.isalnum())
 
+
+def _coerce_spec(spec: DatasetSpec | str | Path | None) -> DatasetSpec:
+    if isinstance(spec, DatasetSpec):
+        return spec
+    if spec is None:
+        raise DatasetSpecError("explicit dataset spec is required")
+    return load_dataset_spec(spec)
+
+
+def expected_dataset_artifacts(
+    spec: DatasetSpec | str | Path | None = None,
+) -> dict[Path, ArtifactSpec]:
+    loaded = _coerce_spec(spec)
+    clean_by_id = loaded.clean_by_id
+    noise_by_id = loaded.noise_by_id
     artifacts: dict[Path, ArtifactSpec] = {}
-    for speaker in SPEAKERS:
-        for sentence in SENTENCES:
-            path = Path("raw") / "clean" / f"spk{speaker}" / f"clean_spk{speaker}_{sentence}.wav"
-            artifacts[path] = ArtifactSpec(path, "clean", speaker, sentence)
-
-    for noise in ("fan", "keyboard", "traffic"):
-        path = Path("raw") / "noise" / f"noise_{noise}_take01.wav"
-        artifacts[path] = ArtifactSpec(path, "noise", noise=noise)
-
-    for speaker in SPEAKERS:
-        for sentence in SENTENCES:
-            noise = NOISE_ASSIGNMENT[(speaker, sentence)]
-            split = "dev" if sentence in {"s01", "s02"} else "locked_test"
-            for snr_code in SNR_CODES:
-                filename = f"mix_spk{speaker}_{sentence}_{noise}_{snr_code}.wav"
-                path = Path("controlled") / split / filename
-                artifacts[path] = ArtifactSpec(
-                    path,
-                    "mix",
-                    speaker,
-                    sentence,
-                    noise,
-                    snr_code,
-                    split,
-                )
-
-    for speaker, (sentence, noise) in REAL_ASSIGNMENT.items():
-        path = Path("raw") / "real" / f"real_spk{speaker}_{noise}_r01.wav"
-        artifacts[path] = ArtifactSpec(
-            path,
+    for item in loaded.clean_recordings:
+        artifacts[item.path] = ArtifactSpec(
+            item.path,
+            "clean",
+            speaker=item.speaker_id,
+            sentence=item.sentence_id,
+            split=item.split,
+        )
+    for item in loaded.noise_recordings:
+        artifacts[item.path] = ArtifactSpec(item.path, "noise", noise=item.noise_type)
+    for item in loaded.mixes:
+        clean = clean_by_id[item.clean_id]
+        noise = noise_by_id[item.noise_id]
+        artifacts[item.path] = ArtifactSpec(
+            item.path,
+            "mix",
+            speaker=clean.speaker_id,
+            sentence=clean.sentence_id,
+            noise=noise.noise_type,
+            snr_code=item.snr_label,
+            snr_db=item.snr_db,
+            split=item.split,
+            sample_id=item.sample_id,
+        )
+    for item in loaded.real_recordings:
+        artifacts[item.path] = ArtifactSpec(
+            item.path,
             "real",
-            speaker,
-            sentence,
-            noise,
-            split="real",
+            speaker=item.speaker_id,
+            sentence=item.sentence_id,
+            noise=item.noise_type,
+            split=item.split,
+            sample_id=item.sample_id,
         )
     return artifacts
 
 
-def required_manifest_primary_paths() -> set[Path]:
-    """Return the 27 mix, 3 real, and 3 S03 clean-control sample paths."""
-
-    artifacts = expected_dataset_artifacts()
-    paths = {
-        path
-        for path, spec in artifacts.items()
-        if spec.kind in {"mix", "real"}
-        or (spec.kind == "clean" and spec.sentence == "s03")
-    }
-    return paths
+def required_manifest_primary_paths(
+    spec: DatasetSpec | str | Path | None = None,
+) -> set[Path]:
+    return _coerce_spec(spec).manifest_primary_paths()
 
 
-def normalize_reference(text: str) -> str:
-    """Apply the same frozen normalization used by the CER implementation."""
+@dataclass(frozen=True, slots=True)
+class _ExpectedRow:
+    sample_id: str
+    primary_path: Path
+    source_type: str
+    split: str
+    speaker_id: str
+    sentence_id: str
+    reference_text: str
+    noise_type: str
+    is_locked: bool
+    is_demo_candidate: bool
+    clean_path: Path | None = None
+    noise_path: Path | None = None
+    mixed_path: Path | None = None
+    snr_db: float | None = None
 
-    normalized = unicodedata.normalize("NFKC", text).lower()
-    return "".join(character for character in normalized if character.isalnum())
+
+def _expected_manifest_rows(spec: DatasetSpec) -> dict[str, _ExpectedRow]:
+    clean_by_id = spec.clean_by_id
+    noise_by_id = spec.noise_by_id
+    expected: dict[str, _ExpectedRow] = {}
+    for item in spec.mixes:
+        clean = clean_by_id[item.clean_id]
+        noise = noise_by_id[item.noise_id]
+        expected[item.sample_id] = _ExpectedRow(
+            sample_id=item.sample_id,
+            primary_path=item.path,
+            source_type="controlled_mix",
+            split=item.split,
+            speaker_id=clean.speaker_id,
+            sentence_id=clean.sentence_id,
+            reference_text=clean.reference_text,
+            noise_type=noise.noise_type,
+            is_locked=item.is_locked,
+            is_demo_candidate=item.is_demo_candidate,
+            clean_path=clean.path,
+            noise_path=noise.path,
+            mixed_path=item.path,
+            snr_db=item.snr_db,
+        )
+    for item in spec.clean_controls:
+        clean = clean_by_id[item.clean_id]
+        expected[item.sample_id] = _ExpectedRow(
+            sample_id=item.sample_id,
+            primary_path=clean.path,
+            source_type="clean_control",
+            split=item.split,
+            speaker_id=clean.speaker_id,
+            sentence_id=clean.sentence_id,
+            reference_text=clean.reference_text,
+            noise_type="",
+            is_locked=item.is_locked,
+            is_demo_candidate=item.is_demo_candidate,
+            clean_path=clean.path,
+            noise_path=None,
+            mixed_path=None,
+        )
+    for item in spec.real_recordings:
+        expected[item.sample_id] = _ExpectedRow(
+            sample_id=item.sample_id,
+            primary_path=item.path,
+            source_type="real",
+            split=item.split,
+            speaker_id=item.speaker_id,
+            sentence_id=item.sentence_id,
+            reference_text=item.reference_text,
+            noise_type=item.noise_type,
+            is_locked=item.is_locked,
+            is_demo_candidate=item.is_demo_candidate,
+            clean_path=None,
+            noise_path=None,
+            mixed_path=item.path,
+        )
+    return expected
 
 
 def _parse_manifest_bool(value: str) -> bool | None:
@@ -266,8 +301,6 @@ def inspect_wav(
     spec: ArtifactSpec,
     policy: ValidationPolicy = DEFAULT_POLICY,
 ) -> tuple[WavInfo | None, list[ValidationIssue]]:
-    """Inspect one WAV without numpy or soundfile."""
-
     issues: list[ValidationIssue] = []
 
     def error(code: str, message: str) -> None:
@@ -391,27 +424,18 @@ def _manifest_path(root: Path, raw_path: str) -> tuple[Path, Path] | None:
     value = raw_path.strip()
     if not value:
         return None
-    supplied = Path(value)
-    if supplied.is_absolute():
-        candidate = supplied.resolve()
-    else:
-        parts = supplied.parts
-        if parts and parts[0] == root.name:
-            supplied = Path(*parts[1:])
-        candidate = (root / supplied).resolve()
     try:
-        relative = candidate.relative_to(root.resolve())
-    except ValueError:
+        candidate = safe_join(root, value)
+        relative = candidate.relative_to(root.resolve(strict=False))
+    except (DatasetSpecError, ValueError):
         return None
     return relative, candidate
 
 
-def _primary_path_field(row: dict[str, str]) -> str:
+def _primary_path_field(row: Mapping[str, str]) -> str:
     source_type = (row.get("source_type") or "").strip().lower()
-    if source_type in {"clean", "clean_control"}:
-        return row.get("clean_path") or ""
-    if source_type == "noise":
-        return row.get("noise_path") or ""
+    if source_type == "clean_control":
+        return row.get("clean_path", "")
     return (row.get("mixed_path") or row.get("clean_path") or "").strip()
 
 
@@ -420,19 +444,17 @@ def validate_manifest(
     manifest_path: Path,
     wav_infos: dict[Path, WavInfo],
     required_primary_paths: Iterable[Path] | None = None,
+    *,
+    spec: DatasetSpec | str | Path | None = None,
 ) -> tuple[list[ValidationIssue], int, int]:
-    """Validate the exact 33-row runnable matrix and every frozen row field."""
+    """Validate manifest fields against the selected generic spec."""
 
+    loaded = _coerce_spec(spec)
+    expected_rows = _expected_manifest_rows(loaded)
+    required_paths = set(required_primary_paths or required_manifest_primary_paths(loaded))
     issues: list[ValidationIssue] = []
     rows_count = 0
     hashes_verified = 0
-    required_paths = set(required_primary_paths or required_manifest_primary_paths())
-    all_artifacts = expected_dataset_artifacts()
-    entries_by_id = {
-        path.stem: (path, all_artifacts[path])
-        for path in required_paths
-        if path in all_artifacts
-    }
 
     def add(code: str, path: str | Path, message: str) -> None:
         issues.append(ValidationIssue("error", code, str(path), message))
@@ -448,26 +470,15 @@ def validate_manifest(
             missing_headers = [field for field in MANIFEST_FIELDS if field not in headers]
             unexpected_headers = [field for field in headers if field not in MANIFEST_FIELDS]
             if missing_headers:
-                add(
-                    "MANIFEST_COLUMNS",
-                    manifest_path,
-                    "missing columns: " + ", ".join(missing_headers),
-                )
+                add("MANIFEST_COLUMNS", manifest_path, "missing required manifest columns")
             if unexpected_headers:
-                add(
-                    "MANIFEST_COLUMNS",
-                    manifest_path,
-                    "unexpected columns: " + ", ".join(unexpected_headers),
-                )
+                add("MANIFEST_COLUMNS", manifest_path, "unexpected manifest columns")
             if len(headers) != len(set(headers)):
                 add("MANIFEST_COLUMNS", manifest_path, "contains duplicate column names")
 
             seen_ids: dict[str, int] = {}
             seen_primary_paths: dict[Path, int] = {}
             hash_cache: dict[Path, str] = {}
-            mix_cell_values: dict[
-                tuple[str, str], list[tuple[int, float, str]]
-            ] = {}
 
             for line_number, raw_row in enumerate(reader, start=2):
                 rows_count += 1
@@ -476,38 +487,23 @@ def validate_manifest(
                     for key, value in raw_row.items()
                     if key is not None
                 }
-                row_label = f"{manifest_path}:{line_number}"
+                row_label = f"{root_relative_label(root, manifest_path)}:{line_number}"
                 if None in raw_row:
                     add("MANIFEST_COLUMNS", row_label, "row has more values than the header")
 
                 sample_id = row.get("sample_id", "")
-                id_entry = entries_by_id.get(sample_id)
+                expected = expected_rows.get(sample_id)
                 if not sample_id:
                     add("MANIFEST_REQUIRED", row_label, "sample_id is empty")
                 elif sample_id in seen_ids:
-                    add(
-                        "MANIFEST_DUPLICATE_ID",
-                        row_label,
-                        f"sample_id {sample_id!r} already appeared on line {seen_ids[sample_id]}",
-                    )
+                    add("MANIFEST_DUPLICATE_ID", row_label, "sample_id is duplicated")
                 else:
                     seen_ids[sample_id] = line_number
 
-                if row.get("dataset_version") != DATASET_VERSION:
-                    add(
-                        "MANIFEST_VERSION",
-                        row_label,
-                        f"dataset_version must be {DATASET_VERSION!r}",
-                    )
-                consent_or_license = row.get("consent_or_license", "")
-                if consent_or_license != APPROVED_CONSENT_TOKEN:
-                    add(
-                        "MANIFEST_CONSENT",
-                        row_label,
-                        "consent_or_license must be the exact formal token "
-                        f"{APPROVED_CONSENT_TOKEN!r}; "
-                        f"{PENDING_CONSENT_TOKEN!r} is development-only",
-                    )
+                if row.get("dataset_version") != loaded.dataset_version:
+                    add("MANIFEST_VERSION", row_label, "dataset_version does not match spec")
+                if row.get("consent_or_license") != loaded.consent_tokens.approved:
+                    add("MANIFEST_CONSENT", row_label, "consent_or_license is not approved")
 
                 resolved_fields: dict[str, tuple[Path, Path]] = {}
                 for field_name in ("clean_path", "noise_path", "mixed_path"):
@@ -516,96 +512,85 @@ def validate_manifest(
                         continue
                     resolved = _manifest_path(root, raw_value)
                     if resolved is None:
-                        add(
-                            "MANIFEST_PATH",
-                            row_label,
-                            f"{field_name} must stay inside dataset root: {raw_value!r}",
-                        )
+                        add("MANIFEST_PATH", row_label, f"{field_name} must stay inside dataset root")
                         continue
                     relative, absolute = resolved
                     resolved_fields[field_name] = resolved
                     if not absolute.is_file():
-                        add(
-                            "MANIFEST_PATH",
-                            row_label,
-                            f"{field_name} does not exist: {relative.as_posix()}",
-                        )
+                        add("MANIFEST_PATH", row_label, f"{field_name} does not exist")
 
-                if id_entry is not None:
-                    _id_path, id_spec = id_entry
-                    primary_field = "clean_path" if id_spec.kind == "clean" else "mixed_path"
-                    primary_raw = row.get(primary_field, "")
-                else:
-                    primary_raw = _primary_path_field(row)
+                primary_raw = _primary_path_field(row)
                 primary_resolved = _manifest_path(root, primary_raw) if primary_raw else None
                 primary_relative: Path | None = None
                 primary_absolute: Path | None = None
                 if primary_resolved is None:
-                    add(
-                        "MANIFEST_PRIMARY_PATH",
-                        row_label,
-                        "cannot determine an in-root primary audio path",
-                    )
+                    add("MANIFEST_PRIMARY_PATH", row_label, "cannot determine a primary audio path")
                 else:
                     primary_relative, primary_absolute = primary_resolved
                     if primary_relative in seen_primary_paths:
-                        add(
-                            "MANIFEST_DUPLICATE_PATH",
-                            row_label,
-                            "primary path already appeared on line "
-                            f"{seen_primary_paths[primary_relative]}: "
-                            f"{primary_relative.as_posix()}",
-                        )
+                        add("MANIFEST_DUPLICATE_PATH", row_label, "primary path is duplicated")
                     else:
                         seen_primary_paths[primary_relative] = line_number
 
-                if id_entry is not None:
-                    semantic_path, spec = id_entry
-                elif primary_relative in required_paths:
-                    semantic_path = primary_relative
-                    spec = all_artifacts[primary_relative]
+                if expected is None:
+                    add("MANIFEST_SAMPLE_ID", row_label, "sample_id is not declared by spec")
                 else:
-                    semantic_path = None
-                    spec = None
+                    if primary_relative != expected.primary_path:
+                        add("MANIFEST_PRIMARY_PATH", row_label, "primary path does not match spec")
+                    expected_values = {
+                        "split": expected.split,
+                        "speaker_id": expected.speaker_id,
+                        "sentence_id": expected.sentence_id,
+                        "noise_type": expected.noise_type,
+                    }
+                    if row.get("source_type", "") != expected.source_type:
+                        add("MANIFEST_SOURCE_TYPE", row_label, "source_type does not match spec")
+                    for field_name, expected_value in expected_values.items():
+                        code = "MANIFEST_SPLIT" if field_name == "split" else "MANIFEST_SEMANTICS"
+                        if row.get(field_name, "") != expected_value:
+                            add(code, row_label, f"{field_name} does not match spec")
+                    path_expectations = {
+                        "clean_path": expected.clean_path,
+                        "noise_path": expected.noise_path,
+                        "mixed_path": expected.mixed_path,
+                    }
+                    for field_name, expected_path in path_expectations.items():
+                        actual_raw = row.get(field_name, "")
+                        actual_resolved = resolved_fields.get(field_name)
+                        if expected_path is None:
+                            if actual_raw:
+                                add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} must be empty")
+                        elif actual_resolved is None:
+                            add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} is required")
+                        elif actual_resolved[0] != expected_path:
+                            add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} does not match spec")
+                    if row.get("reference_text", "") != expected.reference_text:
+                        add("MANIFEST_REFERENCE", row_label, "reference_text does not match spec")
+                    expected_normalized = normalize_reference(expected.reference_text)
+                    if row.get("reference_normalized", "") != expected_normalized:
+                        add("MANIFEST_REFERENCE", row_label, "reference_normalized does not match spec")
 
-                if semantic_path is not None:
-                    if sample_id != semantic_path.stem:
-                        add(
-                            "MANIFEST_SAMPLE_ID",
-                            row_label,
-                            f"sample_id must be {semantic_path.stem!r} for "
-                            f"{semantic_path.as_posix()}",
-                        )
-                    if primary_relative != semantic_path:
-                        actual = (
-                            primary_relative.as_posix()
-                            if primary_relative is not None
-                            else "<missing>"
-                        )
-                        add(
-                            "MANIFEST_PRIMARY_PATH",
-                            row_label,
-                            f"primary path must be {semantic_path.as_posix()}, got {actual}",
-                        )
+                    declared_locked = _parse_manifest_bool(row.get("is_locked", ""))
+                    if declared_locked is None:
+                        add("MANIFEST_BOOLEAN", row_label, "is_locked must be boolean-like")
+                    elif declared_locked is not expected.is_locked:
+                        add("MANIFEST_LOCKED", row_label, "is_locked does not match spec")
+                    declared_demo = _parse_manifest_bool(row.get("is_demo_candidate", ""))
+                    if declared_demo is None:
+                        add("MANIFEST_BOOLEAN", row_label, "is_demo_candidate must be boolean-like")
+                    elif declared_demo is not expected.is_demo_candidate:
+                        add("MANIFEST_DEMO_CANDIDATE", row_label, "is_demo_candidate does not match spec")
 
                 declared_hash = row.get("sha256", "")
                 if not _SHA256_RE.fullmatch(declared_hash):
-                    add(
-                        "MANIFEST_HASH",
-                        row_label,
-                        "sha256 must contain exactly 64 hexadecimal characters",
-                    )
+                    add("MANIFEST_HASH", row_label, "sha256 must contain 64 hexadecimal characters")
                 elif primary_absolute is not None and primary_absolute.is_file():
                     actual_hash = hash_cache.get(primary_absolute)
                     if actual_hash is None:
                         actual_hash = sha256_file(primary_absolute)
                         hash_cache[primary_absolute] = actual_hash
                     if actual_hash != declared_hash.lower():
-                        add(
-                            "MANIFEST_HASH",
-                            row_label,
-                            f"sha256 mismatch for {primary_relative.as_posix()}",
-                        )
+                        add("MANIFEST_HASH", row_label, "sha256 does not match primary audio")
                     else:
                         hashes_verified += 1
 
@@ -616,28 +601,15 @@ def validate_manifest(
                         declared_channels = int(row.get("channels", ""))
                         declared_duration = float(row.get("duration_seconds", ""))
                     except ValueError:
-                        add(
-                            "MANIFEST_AUDIO_META",
-                            row_label,
-                            "sample_rate, channels, and duration_seconds must be numeric",
-                        )
+                        add("MANIFEST_AUDIO_META", row_label, "audio metadata must be numeric")
                     else:
                         if declared_rate != info.sample_rate or declared_channels != info.channels:
-                            add(
-                                "MANIFEST_AUDIO_META",
-                                row_label,
-                                "declared sample_rate/channels do not match WAV header",
-                            )
+                            add("MANIFEST_AUDIO_META", row_label, "audio metadata does not match WAV")
                         tolerance = max(0.001, 1.0 / max(info.sample_rate, 1))
                         if not math.isfinite(declared_duration) or abs(
                             declared_duration - info.duration_seconds
                         ) > tolerance:
-                            add(
-                                "MANIFEST_AUDIO_META",
-                                row_label,
-                                f"declared duration {declared_duration!r} does not match "
-                                f"{info.duration_seconds:.6f}",
-                            )
+                            add("MANIFEST_AUDIO_META", row_label, "duration_seconds does not match WAV")
 
                 distance = row.get("recording_distance_cm", "")
                 if distance:
@@ -646,256 +618,45 @@ def validate_manifest(
                     except ValueError:
                         numeric_distance = math.nan
                     if not math.isfinite(numeric_distance) or numeric_distance < 0:
-                        add(
-                            "MANIFEST_AUDIO_META",
-                            row_label,
-                            "recording_distance_cm must be empty or a finite non-negative number",
-                        )
+                        add("MANIFEST_AUDIO_META", row_label, "recording_distance_cm is invalid")
 
-                if spec is None or semantic_path is None:
-                    continue
-
-                expected_source_type = {
-                    "mix": "controlled_mix",
-                    "clean": "clean_control",
-                    "real": "real",
-                }[spec.kind]
-                expected_split = (
-                    spec.split
-                    if spec.kind == "mix"
-                    else "clean_control" if spec.kind == "clean" else "real"
-                )
-                expected_locked = spec.kind == "clean" or (
-                    spec.kind == "mix" and spec.split == "locked_test"
-                )
-                expected_speaker = spec.speaker or ""
-                expected_sentence = (spec.sentence or "").upper()
-                expected_noise = spec.noise or ""
-
-                expected_values = {
-                    "source_type": expected_source_type,
-                    "split": expected_split,
-                    "speaker_id": expected_speaker,
-                    "sentence_id": expected_sentence,
-                    "noise_type": expected_noise,
-                }
-                for field_name, expected_value in expected_values.items():
-                    if row.get(field_name, "") != expected_value:
-                        add(
-                            "MANIFEST_SEMANTICS",
-                            row_label,
-                            f"{field_name} must be {expected_value!r} for "
-                            f"{semantic_path.name}",
-                        )
-
-                sentence_key = spec.sentence or ""
-                expected_reference = REFERENCE_TEXTS.get(sentence_key, "")
-                if row.get("reference_text", "") != expected_reference:
-                    add(
-                        "MANIFEST_REFERENCE",
-                        row_label,
-                        f"reference_text does not match frozen {expected_sentence}",
-                    )
-                expected_normalized = normalize_reference(expected_reference)
-                if row.get("reference_normalized", "") != expected_normalized:
-                    add(
-                        "MANIFEST_REFERENCE",
-                        row_label,
-                        f"reference_normalized does not match frozen {expected_sentence}",
-                    )
-
-                declared_locked = _parse_manifest_bool(row.get("is_locked", ""))
-                if declared_locked is None:
-                    add(
-                        "MANIFEST_BOOLEAN",
-                        row_label,
-                        "is_locked must be true/false (or 1/0, yes/no)",
-                    )
-                elif declared_locked is not expected_locked:
-                    add(
-                        "MANIFEST_LOCKED",
-                        row_label,
-                        f"is_locked must be {str(expected_locked).lower()} for "
-                        f"{semantic_path.name}",
-                    )
-
-                expected_demo = semantic_path.stem in DEMO_SAMPLE_IDS
-                declared_demo = _parse_manifest_bool(row.get("is_demo_candidate", ""))
-                if declared_demo is None:
-                    add(
-                        "MANIFEST_BOOLEAN",
-                        row_label,
-                        "is_demo_candidate must be true/false (or 1/0, yes/no)",
-                    )
-                elif declared_demo is not expected_demo:
-                    add(
-                        "MANIFEST_DEMO_CANDIDATE",
-                        row_label,
-                        f"is_demo_candidate must be {str(expected_demo).lower()} for "
-                        f"{semantic_path.name}",
-                    )
-
-                expected_path_fields: dict[str, Path] = {}
-                forbidden_path_fields: tuple[str, ...]
-                if spec.kind == "mix":
-                    expected_path_fields = {
-                        "clean_path": Path("raw")
-                        / "clean"
-                        / f"spk{spec.speaker}"
-                        / f"clean_spk{spec.speaker}_{spec.sentence}.wav",
-                        "noise_path": Path("raw")
-                        / "noise"
-                        / f"noise_{spec.noise}_take01.wav",
-                        "mixed_path": semantic_path,
-                    }
-                    forbidden_path_fields = ()
-                elif spec.kind == "clean":
-                    expected_path_fields = {"clean_path": semantic_path}
-                    forbidden_path_fields = ("noise_path", "mixed_path")
-                else:
-                    expected_path_fields = {"mixed_path": semantic_path}
-                    forbidden_path_fields = ("clean_path", "noise_path")
-
-                for field_name, expected_path in expected_path_fields.items():
-                    resolved = resolved_fields.get(field_name)
-                    if resolved is None:
-                        add(
-                            "MANIFEST_PATH_SEMANTICS",
-                            row_label,
-                            f"{field_name} is required for {semantic_path.name}",
-                        )
-                    elif resolved[0] != expected_path:
-                        add(
-                            "MANIFEST_PATH_SEMANTICS",
-                            row_label,
-                            f"{field_name} must point to {expected_path.as_posix()}",
-                        )
-                for field_name in forbidden_path_fields:
-                    if row.get(field_name, ""):
-                        add(
-                            "MANIFEST_PATH_SEMANTICS",
-                            row_label,
-                            f"{field_name} must be empty for {expected_source_type}",
-                        )
-
-                mix_only_fields = (
-                    "snr_db",
-                    "mix_seed",
-                    "noise_offset_seconds",
-                    "mix_alpha",
-                    "final_gain",
-                )
-                if spec.kind != "mix":
-                    for field_name in mix_only_fields:
+                if expected is None or expected.snr_db is None:
+                    for field_name in ("snr_db", "mix_seed", "noise_offset_seconds", "mix_alpha", "final_gain"):
                         if row.get(field_name, ""):
-                            add(
-                                "MANIFEST_MIX_META",
-                                row_label,
-                                f"{field_name} must be empty for {expected_source_type}",
-                            )
+                            add("MANIFEST_MIX_META", row_label, f"{field_name} must be empty")
                     continue
 
                 try:
                     declared_snr = float(row.get("snr_db", ""))
                 except ValueError:
                     declared_snr = math.nan
-                expected_snr = SNR_CODES[spec.snr_code or ""]
-                if not math.isfinite(declared_snr) or declared_snr != expected_snr:
-                    add(
-                        "MANIFEST_SNR",
-                        row_label,
-                        f"expected finite snr_db {expected_snr:g}, got {row.get('snr_db', '')!r}",
-                    )
-
+                if not math.isfinite(declared_snr) or declared_snr != expected.snr_db:
+                    add("MANIFEST_SNR", row_label, "snr_db does not match spec")
                 seed_raw = row.get("mix_seed", "")
-                seed_value: int | None = None
                 if not _INTEGER_RE.fullmatch(seed_raw):
                     add("MANIFEST_MIX_META", row_label, "mix_seed must be an integer")
-                else:
-                    seed_value = int(seed_raw)
-
-                def finite_mix_value(field_name: str) -> float | None:
+                for field_name in ("noise_offset_seconds", "mix_alpha", "final_gain"):
                     try:
                         value = float(row.get(field_name, ""))
                     except ValueError:
                         value = math.nan
                     if not math.isfinite(value):
-                        add(
-                            "MANIFEST_MIX_META",
-                            row_label,
-                            f"{field_name} must be a finite number",
-                        )
-                        return None
-                    return value
+                        add("MANIFEST_MIX_META", row_label, f"{field_name} must be finite")
+                    elif field_name != "noise_offset_seconds" and value <= 0:
+                        add("MANIFEST_MIX_META", row_label, f"{field_name} must be positive")
+                    elif field_name == "final_gain" and value > 1:
+                        add("MANIFEST_MIX_META", row_label, "final_gain must be at most one")
+                    elif field_name == "noise_offset_seconds" and value < 0:
+                        add("MANIFEST_MIX_META", row_label, "noise_offset_seconds must be non-negative")
 
-                offset = finite_mix_value("noise_offset_seconds")
-                alpha = finite_mix_value("mix_alpha")
-                final_gain = finite_mix_value("final_gain")
-                if offset is not None and offset < 0:
-                    add(
-                        "MANIFEST_MIX_META",
-                        row_label,
-                        "noise_offset_seconds must be non-negative",
-                    )
-                if alpha is not None and alpha <= 0:
-                    add("MANIFEST_MIX_META", row_label, "mix_alpha must be greater than zero")
-                if final_gain is not None and not 0 < final_gain <= 1:
-                    add(
-                        "MANIFEST_MIX_META",
-                        row_label,
-                        "final_gain must be greater than zero and at most one",
-                    )
-                if (
-                    seed_value is not None
-                    and offset is not None
-                    and offset >= 0
-                    and spec.speaker is not None
-                    and spec.sentence is not None
-                ):
-                    mix_cell_values.setdefault(
-                        (spec.speaker, spec.sentence), []
-                    ).append((seed_value, offset, row_label))
-
-            expected_row_count = len(required_paths)
+            expected_row_count = len(expected_rows)
             if rows_count != expected_row_count:
-                add(
-                    "MANIFEST_ROW_COUNT",
-                    manifest_path,
-                    f"manifest must contain exactly {expected_row_count} rows, got {rows_count}",
-                )
-
+                add("MANIFEST_ROW_COUNT", manifest_path, "manifest row count does not match spec")
             actual_primary_paths = set(seen_primary_paths)
-            missing_primary = sorted(
-                required_paths - actual_primary_paths,
-                key=lambda item: item.as_posix(),
-            )
-            unexpected_primary = sorted(
-                actual_primary_paths - required_paths,
-                key=lambda item: item.as_posix(),
-            )
-            for relative in missing_primary:
-                add(
-                    "MANIFEST_COVERAGE",
-                    manifest_path,
-                    f"missing runnable sample row for {relative.as_posix()}",
-                )
-            for relative in unexpected_primary:
-                add(
-                    "MANIFEST_COVERAGE",
-                    manifest_path,
-                    f"unexpected primary sample path {relative.as_posix()}",
-                )
-
-            for (speaker, sentence), values in sorted(mix_cell_values.items()):
-                seeds = {seed for seed, _offset, _label in values}
-                offsets = {offset for _seed, offset, _label in values}
-                if len(seeds) > 1 or len(offsets) > 1:
-                    add(
-                        "MANIFEST_MIX_CELL",
-                        manifest_path,
-                        f"spk{speaker}/{sentence} must share one mix_seed and one "
-                        "noise_offset_seconds across its three SNR variants",
-                    )
+            for relative in sorted(required_paths - actual_primary_paths, key=lambda item: item.as_posix()):
+                add("MANIFEST_COVERAGE", manifest_path, "manifest is missing a required primary path")
+            for relative in sorted(actual_primary_paths - required_paths, key=lambda item: item.as_posix()):
+                add("MANIFEST_COVERAGE", manifest_path, "manifest contains an unexpected primary path")
     except (csv.Error, OSError, UnicodeError) as exc:
         add("MANIFEST_UNREADABLE", manifest_path, f"cannot read manifest: {exc}")
 
@@ -906,10 +667,14 @@ def validate_dataset(
     root: str | Path,
     manifest_path: str | Path | None = None,
     policy: ValidationPolicy = DEFAULT_POLICY,
+    *,
+    spec_path: str | Path | None = None,
+    spec: DatasetSpec | None = None,
 ) -> ValidationReport:
     dataset_root = Path(root).expanduser().resolve()
+    loaded = spec or load_dataset_spec(spec_path)
     report = ValidationReport(root=dataset_root)
-    artifacts = expected_dataset_artifacts()
+    artifacts = expected_dataset_artifacts(loaded)
     report.expected_wavs = len(artifacts)
 
     if not dataset_root.is_dir():
@@ -917,14 +682,15 @@ def validate_dataset(
         return report
 
     wav_infos: dict[Path, WavInfo] = {}
-    for relative, spec in artifacts.items():
+    for relative, artifact in artifacts.items():
         absolute = dataset_root / relative
         if not absolute.is_file():
-            report.add("error", "MISSING_WAV", relative, f"required {spec.kind} recording is missing")
+            report.add("error", "MISSING_WAV", relative, "required WAV is missing")
             continue
         report.checked_wavs += 1
-        info, issues = inspect_wav(absolute, spec, policy)
-        report.issues.extend(issues)
+        info, issues = inspect_wav(absolute, artifact, policy)
+        for issue in issues:
+            report.add(issue.severity, issue.code, issue.path, issue.message)
         if info is not None:
             wav_infos[relative] = info
 
@@ -940,45 +706,61 @@ def validate_dataset(
                     "error",
                     "INVALID_WAV_NAME_OR_LOCATION",
                     relative,
-                    "WAV does not match the frozen filename and directory matrix",
+                    "WAV is not declared by the selected spec",
                 )
 
-    selected_manifest = (
-        Path(manifest_path).expanduser().resolve()
-        if manifest_path is not None
-        else dataset_root / "manifest.csv"
-    )
+    if manifest_path is None:
+        selected_manifest = dataset_root / "manifest.csv"
+    else:
+        supplied_manifest = Path(manifest_path).expanduser()
+        try:
+            if supplied_manifest.is_absolute():
+                manifest_relative = supplied_manifest.resolve().relative_to(dataset_root)
+            else:
+                manifest_relative = supplied_manifest
+            selected_manifest = safe_join(dataset_root, manifest_relative)
+        except (DatasetSpecError, ValueError):
+            report.add(
+                "error",
+                "MANIFEST_PATH",
+                "manifest.csv",
+                "manifest must stay inside dataset root",
+            )
+            return report
     manifest_issues, row_count, hash_count = validate_manifest(
         dataset_root,
         selected_manifest,
         wav_infos,
+        spec=loaded,
     )
-    report.issues.extend(manifest_issues)
+    for issue in manifest_issues:
+        report.add(issue.severity, issue.code, issue.path, issue.message)
     report.manifest_rows = row_count
     report.hashes_verified = hash_count
     return report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Validate AudioRescue-CN-Mini-v1 recordings and manifest.csv",
-    )
+    parser = argparse.ArgumentParser(description="Validate AudioRescue dataset recordings and manifest.csv")
+    parser.add_argument("dataset_root", nargs="?", default="data_local")
+    parser.add_argument("--manifest", help="optional manifest path; defaults to DATASET_ROOT/manifest.csv")
+    parser.add_argument("--spec", help="local dataset spec JSON")
     parser.add_argument(
-        "dataset_root",
-        nargs="?",
-        default="data_local",
-        help="dataset root containing raw/, controlled/, and manifest.csv",
-    )
-    parser.add_argument(
-        "--manifest",
-        help="optional manifest path; defaults to DATASET_ROOT/manifest.csv",
+        "--example-spec",
+        action="store_true",
+        help="explicitly use the tracked synthetic example spec",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = validate_dataset(args.dataset_root, args.manifest)
+    try:
+        spec = load_dataset_spec(args.spec, allow_example=args.example_spec)
+        report = validate_dataset(args.dataset_root, args.manifest, spec=spec)
+    except (DatasetSpecError, OSError, RuntimeError, ValueError):
+        print("Dataset validation refused: DATASET_INPUT_INVALID")
+        return 2
     print(report.render())
     return 0 if report.ok else 1
 
