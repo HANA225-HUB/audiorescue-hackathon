@@ -8,8 +8,11 @@ Git.
 from __future__ import annotations
 
 import json
+import hashlib
+import stat
+import subprocess
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 
@@ -17,7 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SPEC_PATH = PROJECT_ROOT / "configs" / "dataset_spec.example.json"
 DEFAULT_PENDING_CONSENT_TOKEN = "pending_local_authorization"
 DEFAULT_APPROVED_CONSENT_TOKEN = "approved_for_evaluation"
-LEGACY_EVALUATION_HOLDOUT_SPLIT = "_".join(("locked", "test"))
+FIXED_SAMPLE_RATE = 48_000
+FIXED_CHANNELS = 1
+FIXED_SAMPLE_WIDTH_BYTES = 2
 
 
 class DatasetSpecError(ValueError):
@@ -88,6 +93,7 @@ class DatasetSpec:
     sample_rate: int
     channels: int
     sample_width_bytes: int
+    protected_splits: tuple[str, ...]
     consent_tokens: ConsentTokens
     clean_recordings: tuple[CleanRecording, ...]
     noise_recordings: tuple[NoiseRecording, ...]
@@ -126,6 +132,21 @@ class DatasetSpec:
         paths.update(item.path for item in self.real_recordings)
         return paths
 
+    def split_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in (*self.mixes, *self.clean_controls, *self.real_recordings):
+            split = item.split
+            counts[split] = counts.get(split, 0) + 1
+        return counts
+
+    def locked_sample_ids(self) -> tuple[str, ...]:
+        sample_ids = [
+            item.sample_id
+            for item in (*self.mixes, *self.clean_controls, *self.real_recordings)
+            if item.is_locked
+        ]
+        return tuple(sorted(sample_ids))
+
     def to_public_dict(self) -> dict[str, Any]:
         def convert(value: Any) -> Any:
             if isinstance(value, Path):
@@ -147,6 +168,7 @@ def _default_payload() -> dict[str, Any]:
         "sample_rate": 48_000,
         "channels": 1,
         "sample_width_bytes": 2,
+        "protected_splits": ["holdout", "clean_control"],
         "consent_tokens": {
             "pending": DEFAULT_PENDING_CONSENT_TOKEN,
             "approved": DEFAULT_APPROVED_CONSENT_TOKEN,
@@ -225,97 +247,6 @@ def _default_payload() -> dict[str, Any]:
     }
 
 
-def evaluation_compat_spec() -> DatasetSpec:
-    """Return a neutral matrix matching the existing evaluation runner counts.
-
-    `scripts.run_evaluation` still owns fixed split counts outside this
-    dispatch's allowed files. This compatibility spec keeps those tests and
-    guards functional without restoring private literals.
-    """
-
-    clean_items: list[CleanRecording] = []
-    for speaker_index in range(1, 4):
-        for sentence_index in range(1, 4):
-            clean_items.append(
-                CleanRecording(
-                    id=f"clean_{speaker_index}_{sentence_index}",
-                    speaker_id=f"speaker_{speaker_index}",
-                    sentence_id=f"sentence_{sentence_index}",
-                    reference_text=f"synthetic reference {speaker_index}-{sentence_index}",
-                    path=Path(
-                        f"raw/clean/speaker_{speaker_index}/"
-                        f"sample_clean_{speaker_index}_{sentence_index}.wav"
-                    ),
-                    split=LEGACY_EVALUATION_HOLDOUT_SPLIT if sentence_index == 3 else "dev",
-                )
-            )
-    noise_items = tuple(
-        NoiseRecording(
-            id=f"noise_{index}",
-            noise_type=f"noise_class_{index}",
-            path=Path(f"raw/noise/noise_class_{index}.wav"),
-        )
-        for index in range(1, 4)
-    )
-    mixes: list[MixSpec] = []
-    snr_items = ((5, "snrp05"), (0, "snr000"), (-5, "snrm05"))
-    for clean in clean_items:
-        sentence_index = int(clean.sentence_id.rsplit("_", 1)[1])
-        speaker_index = int(clean.speaker_id.rsplit("_", 1)[1])
-        noise_index = ((speaker_index + sentence_index - 2) % 3) + 1
-        for snr_db, snr_label in snr_items:
-            sample_id = f"sample_mix_{speaker_index}_{sentence_index}_{snr_label}"
-            mixes.append(
-                MixSpec(
-                    sample_id=sample_id,
-                    clean_id=clean.id,
-                    noise_id=f"noise_{noise_index}",
-                    split=clean.split,
-                    snr_db=float(snr_db),
-                    snr_label=snr_label,
-                    path=Path(f"controlled/{clean.split}/{sample_id}.wav"),
-                    is_locked=clean.split == LEGACY_EVALUATION_HOLDOUT_SPLIT,
-                    is_demo_candidate=False,
-                )
-            )
-    controls = tuple(
-        CleanControlSpec(
-            sample_id=f"sample_clean_control_{index}",
-            clean_id=f"clean_{index}_3",
-            split="clean_control",
-            is_locked=True,
-            is_demo_candidate=False,
-        )
-        for index in range(1, 4)
-    )
-    real_items = tuple(
-        RealRecording(
-            sample_id=f"sample_real_{index}",
-            speaker_id=f"speaker_{index}",
-            sentence_id=f"sentence_{index}",
-            reference_text=f"synthetic real reference {index}",
-            noise_type=f"noise_class_{index}",
-            path=Path(f"raw/real/sample_real_{index}.wav"),
-            split="real",
-            is_locked=False,
-            is_demo_candidate=False,
-        )
-        for index in range(1, 4)
-    )
-    return DatasetSpec(
-        dataset_version="audiorescue-synthetic-template-v1",
-        sample_rate=48_000,
-        channels=1,
-        sample_width_bytes=2,
-        consent_tokens=ConsentTokens(),
-        clean_recordings=tuple(clean_items),
-        noise_recordings=noise_items,
-        mixes=tuple(mixes),
-        clean_controls=controls,
-        real_recordings=real_items,
-    )
-
-
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise DatasetSpecError(f"{label} must be an object")
@@ -370,12 +301,21 @@ def _check_unique(values: list[str], label: str) -> None:
         raise DatasetSpecError(f"{label} contains duplicate values")
 
 
-def _load_payload(path: str | Path | None) -> Mapping[str, Any]:
+def _check_global_unique(values: list[str], label: str = "dataset identifiers") -> None:
+    if len(values) != len(set(values)):
+        raise DatasetSpecError(f"{label} contain duplicate values")
+
+
+def _load_payload(path: str | Path | None, *, allow_example: bool) -> Mapping[str, Any]:
     if path is None:
-        if EXAMPLE_SPEC_PATH.is_file():
-            path = EXAMPLE_SPEC_PATH
-        else:
+        if not allow_example:
+            raise DatasetSpecError(
+                "explicit dataset spec is required; pass a local spec path "
+                "or request explicit example mode"
+            )
+        if not EXAMPLE_SPEC_PATH.is_file():
             return _default_payload()
+        path = EXAMPLE_SPEC_PATH
     try:
         raw = Path(path).read_text(encoding="utf-8")
         value = json.loads(raw)
@@ -384,14 +324,66 @@ def _load_payload(path: str | Path | None) -> Mapping[str, Any]:
     return _require_mapping(value, "dataset spec")
 
 
-def load_dataset_spec(path: str | Path | None = None) -> DatasetSpec:
-    payload = _load_payload(path)
+def spec_content_hash(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_example_dataset_spec() -> DatasetSpec:
+    return load_dataset_spec(None, allow_example=True)
+
+
+def _load_integer(payload: Mapping[str, Any], field_name: str, default: int) -> int:
+    value = payload.get(field_name, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DatasetSpecError("audio format must be 48 kHz mono PCM16")
+    return value
+
+
+def _validate_fixed_audio_format(
+    sample_rate: int,
+    channels: int,
+    sample_width_bytes: int,
+) -> None:
+    if (
+        sample_rate != FIXED_SAMPLE_RATE
+        or channels != FIXED_CHANNELS
+        or sample_width_bytes != FIXED_SAMPLE_WIDTH_BYTES
+    ):
+        raise DatasetSpecError("audio format must be 48 kHz mono PCM16")
+
+
+def _validate_split_invariants(spec: DatasetSpec) -> None:
+    protected = set(spec.protected_splits)
+    rows = (*spec.mixes, *spec.clean_controls, *spec.real_recordings)
+    for row in rows:
+        if row.split in protected and (not row.is_locked or row.is_demo_candidate):
+            raise DatasetSpecError("split invariant violation")
+        if row.is_locked and row.is_demo_candidate:
+            raise DatasetSpecError("split invariant violation")
+
+
+def load_dataset_spec(
+    path: str | Path | None = None,
+    *,
+    allow_example: bool = False,
+) -> DatasetSpec:
+    payload = _load_payload(path, allow_example=allow_example)
     version = _require_text(payload, "dataset_version", "dataset_spec")
-    sample_rate = int(payload.get("sample_rate", 48_000))
-    channels = int(payload.get("channels", 1))
-    sample_width_bytes = int(payload.get("sample_width_bytes", 2))
-    if sample_rate <= 0 or channels <= 0 or sample_width_bytes <= 0:
-        raise DatasetSpecError("audio format values must be positive")
+    sample_rate = _load_integer(payload, "sample_rate", FIXED_SAMPLE_RATE)
+    channels = _load_integer(payload, "channels", FIXED_CHANNELS)
+    sample_width_bytes = _load_integer(
+        payload, "sample_width_bytes", FIXED_SAMPLE_WIDTH_BYTES
+    )
+    _validate_fixed_audio_format(sample_rate, channels, sample_width_bytes)
+    protected_splits = tuple(
+        _require_text(
+            _require_mapping({"value": value}, "protected_splits[]"),
+            "value",
+            "protected_splits[]",
+        )
+        for value in _require_list(payload, "protected_splits")
+    )
+    _check_unique(list(protected_splits), "protected_splits")
     consent_payload = _require_mapping(payload.get("consent_tokens", {}), "consent_tokens")
     consent = ConsentTokens(
         pending=_require_text(consent_payload, "pending", "consent_tokens"),
@@ -431,6 +423,7 @@ def load_dataset_spec(path: str | Path | None = None) -> DatasetSpec:
     noise_ids = [item.id for item in noise_items]
     _check_unique(clean_ids, "clean_recordings.id")
     _check_unique(noise_ids, "noise_recordings.id")
+    _check_global_unique(clean_ids + noise_ids)
     clean_id_set = set(clean_ids)
     noise_id_set = set(noise_ids)
 
@@ -499,28 +492,134 @@ def load_dataset_spec(path: str | Path | None = None) -> DatasetSpec:
         + [item.sample_id for item in real_items]
     )
     _check_unique(sample_ids, "manifest sample_id")
-    _check_unique([path.as_posix() for path in DatasetSpec(
+    _check_global_unique(
+        clean_ids + noise_ids + [item.sample_id for item in real_items],
+    )
+    loaded_spec = DatasetSpec(
         version,
         sample_rate,
         channels,
         sample_width_bytes,
+        protected_splits,
         consent,
         tuple(clean_items),
         tuple(noise_items),
         tuple(mix_items),
         tuple(clean_control_items),
         tuple(real_items),
-    ).required_audio_paths()], "audio paths")
-
-    return DatasetSpec(
-        dataset_version=version,
-        sample_rate=sample_rate,
-        channels=channels,
-        sample_width_bytes=sample_width_bytes,
-        consent_tokens=consent,
-        clean_recordings=tuple(clean_items),
-        noise_recordings=tuple(noise_items),
-        mixes=tuple(mix_items),
-        clean_controls=tuple(clean_control_items),
-        real_recordings=tuple(real_items),
     )
+    _check_unique(
+        [path.as_posix() for path in loaded_spec.required_audio_paths()],
+        "audio paths",
+    )
+    _validate_split_invariants(loaded_spec)
+
+    return loaded_spec
+
+
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(info, "st_file_attributes", 0)
+    return path.is_symlink() or bool(reparse_flag and file_attributes & reparse_flag)
+
+
+def _check_existing_absolute_components(path: Path) -> None:
+    absolute = Path(path).expanduser()
+    if not absolute.is_absolute():
+        absolute = Path.cwd() / absolute
+    current = Path(absolute.anchor) if absolute.anchor else Path()
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current = current / part
+        if not current.exists():
+            break
+        if _is_link_or_reparse_point(current):
+            raise DatasetSpecError("unsafe path component")
+
+
+def _check_existing_components(root: Path, relative: Path, *, include_leaf: bool) -> None:
+    current = root
+    components = relative.parts if include_leaf else relative.parts[:-1]
+    if current.exists() and _is_link_or_reparse_point(current):
+        raise DatasetSpecError("unsafe path component")
+    for part in components:
+        current = current / part
+        if current.exists() and _is_link_or_reparse_point(current):
+            raise DatasetSpecError("unsafe path component")
+
+
+def safe_join(
+    root: str | Path,
+    relative_path: str | Path,
+    *,
+    must_exist: bool = False,
+) -> Path:
+    raw = str(relative_path).replace("\\", "/").strip()
+    if not raw:
+        raise DatasetSpecError("unsafe path")
+    raw_parts = raw.split("/")
+    if (
+        raw.startswith("/")
+        or any(part in {"", ".", ".."} for part in raw_parts)
+        or any(":" in part for part in raw_parts)
+    ):
+        raise DatasetSpecError("unsafe path")
+    pure_relative = PurePosixPath(raw)
+    if pure_relative.is_absolute():
+        raise DatasetSpecError("unsafe path")
+    relative = Path(*pure_relative.parts)
+
+    root_path = Path(root).expanduser()
+    _check_existing_absolute_components(root_path)
+    root_resolved = root_path.resolve(strict=False)
+    _check_existing_components(
+        root_path,
+        relative,
+        include_leaf=must_exist or (root_path / relative).exists(),
+    )
+    candidate = (root_path / relative).resolve(strict=False)
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError as exc:
+        raise DatasetSpecError("unsafe path") from exc
+    if must_exist and not candidate.is_file():
+        raise DatasetSpecError("unsafe path")
+    return candidate
+
+
+def root_relative_label(root: str | Path, path: str | Path) -> str:
+    root_resolved = Path(root).expanduser().resolve(strict=False)
+    resolved = Path(path).expanduser().resolve(strict=False)
+    try:
+        return resolved.relative_to(root_resolved).as_posix()
+    except ValueError:
+        return "<external-path>"
+
+
+def ensure_private_repo_root(
+    dataset_root: str | Path,
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+) -> None:
+    root_path = Path(dataset_root).expanduser()
+    _check_existing_absolute_components(root_path)
+    root = root_path.resolve(strict=False)
+    project = Path(project_root).expanduser().resolve(strict=False)
+    try:
+        relative = root.relative_to(project)
+    except ValueError:
+        return
+    check = subprocess.run(
+        ["git", "check-ignore", "-q", "--", relative.as_posix()],
+        cwd=project,
+        check=False,
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        raise DatasetSpecError(
+            "dataset root inside the repository must be ignored by Git"
+        )

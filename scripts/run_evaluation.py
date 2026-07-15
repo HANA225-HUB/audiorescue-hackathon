@@ -25,8 +25,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from scripts.dataset_spec import (
+    DatasetSpec,
+    DatasetSpecError,
+    load_dataset_spec,
+    root_relative_label,
+    safe_join,
+    spec_content_hash,
+)
 
-SPLITS = ("dev", "locked_test", "real", "clean_control")
 STATUSES = ("success", "partial", "failed")
 REQUIRED_MANIFEST_FIELDS = {
     "sample_id",
@@ -41,12 +48,6 @@ REQUIRED_MANIFEST_FIELDS = {
     "sha256",
     "is_locked",
 }
-EXPECTED_SPLIT_COUNTS = {
-    "dev": 18,
-    "locked_test": 9,
-    "real": 3,
-    "clean_control": 3,
-}
 INTEGRITY_GATED_SPLITS = {"locked_test", "clean_control"}
 CER_TIE_TOLERANCE = 1e-12
 SCHEMA_VERSION = "audiorescue-evaluation-v1"
@@ -55,8 +56,6 @@ RECEIPT_SCHEMA_VERSION = "audiorescue-locked-test-receipt-v2"
 LOCKED_DATASET_IDENTITY_VERSION = "audiorescue-locked-dataset-identity-v1"
 DATASET_VALIDATOR_ID = "scripts.validate_dataset.validate_dataset"
 DATASET_VALIDATOR_VERSION = "audiorescue-dataset-validator-v1"
-EXPECTED_DATASET_WAVS = 42
-EXPECTED_MANIFEST_ROWS = 33
 LOCKED_RECEIPT_ROOT = (
     Path(__file__).resolve().parents[1] / "data_local" / ".locked_receipts"
 )
@@ -101,6 +100,41 @@ class FrozenIdentity:
     payload: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedDatasetSpec:
+    spec: DatasetSpec
+    sha256: str | None
+
+
+def _load_evaluation_spec(value: str | Path | DatasetSpec | None) -> LoadedDatasetSpec:
+    if isinstance(value, DatasetSpec):
+        return LoadedDatasetSpec(value, None)
+    if value is None:
+        raise EvaluationError("explicit dataset spec is required")
+    try:
+        return LoadedDatasetSpec(load_dataset_spec(value), spec_content_hash(value))
+    except (DatasetSpecError, OSError) as exc:
+        raise EvaluationError("dataset spec is invalid") from exc
+
+
+def _safe_manifest_path(root: Path, manifest_path: str | Path) -> Path:
+    supplied = Path(manifest_path).expanduser()
+    if supplied.is_absolute():
+        resolved = supplied.resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError as exc:
+            raise EvaluationError("manifest must stay inside dataset root") from exc
+        try:
+            return safe_join(root, relative, must_exist=True)
+        except DatasetSpecError as exc:
+            raise EvaluationError("manifest path is unsafe") from exc
+    try:
+        return safe_join(root, supplied, must_exist=True)
+    except DatasetSpecError as exc:
+        raise EvaluationError("manifest path is unsafe") from exc
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -133,6 +167,7 @@ def _manifest_dataset_version(snapshot: ManifestSnapshot) -> str:
 def _build_locked_dataset_identity(
     *,
     locked_samples: Sequence[tuple[str, str]],
+    expected_ids: Sequence[str],
 ) -> tuple[str, dict[str, Any]]:
     """Build the one-shot identity from data, never code/config/freeze bytes."""
 
@@ -150,13 +185,13 @@ def _build_locked_dataset_identity(
             )
         normalized[sample_id] = audio_sha256.lower()
 
-    expected_ids = set(_canonical_primary_paths("locked_test"))
-    if set(normalized) != expected_ids:
-        missing = sorted(expected_ids - set(normalized))
-        unexpected = sorted(set(normalized) - expected_ids)
+    expected_id_set = set(expected_ids)
+    if set(normalized) != expected_id_set:
+        missing = sorted(expected_id_set - set(normalized))
+        unexpected = sorted(set(normalized) - expected_id_set)
         raise EvaluationError(
-            "locked dataset identity must contain the canonical 9 samples; "
-            f"missing={missing}, unexpected={unexpected}"
+            "locked dataset identity does not match the selected dataset spec; "
+            f"missing={len(missing)}, unexpected={len(unexpected)}"
         )
 
     canonical_samples = [
@@ -213,11 +248,11 @@ def _inspect_runtime_identity() -> RuntimeIdentity:
         else (project_root / "configs" / "app.yaml").resolve()
     )
     if not config_path.is_file():
-        raise EvaluationError(f"current pipeline config does not exist: {config_path}")
+        raise EvaluationError("current pipeline config does not exist")
     try:
         config_sha256 = sha256_file(config_path)
     except OSError as exc:
-        raise EvaluationError(f"cannot hash current pipeline config {config_path}: {exc}") from exc
+        raise EvaluationError("cannot hash current pipeline config") from exc
     return RuntimeIdentity(
         git_commit=commit,
         git_dirty=bool(status.strip()),
@@ -247,6 +282,7 @@ def _validate_frozen_config(
     frozen_config: str | Path | None,
     confirm_locked: bool,
     *,
+    spec: DatasetSpec,
     manifest_sha256: str,
     manifest_path: Path,
     manifest_dataset_version: str,
@@ -266,14 +302,14 @@ def _validate_frozen_config(
 
     path = Path(frozen_config).expanduser().resolve()
     if not path.is_file():
-        raise EvaluationError(f"frozen config does not exist: {path}")
+        raise EvaluationError("frozen config does not exist")
     try:
         raw_bytes = path.read_bytes()
         parsed_config = json.loads(raw_bytes.decode("utf-8"))
         # Python accepts NaN/Infinity by default even though JSON does not.
         json.dumps(parsed_config, allow_nan=False)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise EvaluationError(f"frozen config is not valid JSON: {path}: {exc}") from exc
+        raise EvaluationError("frozen config is not valid JSON") from exc
 
     if split in INTEGRITY_GATED_SPLITS:
         if not isinstance(parsed_config, Mapping):
@@ -315,14 +351,15 @@ def _validate_frozen_config(
             raise EvaluationError(
                 "locked freeze manifest.path does not match the manifest being evaluated"
             )
-        if frozen_manifest.get("row_count") != EXPECTED_MANIFEST_ROWS:
-            raise EvaluationError("locked freeze manifest.row_count must be 33")
+        expected_manifest_rows = sum(spec.split_counts().values())
+        if frozen_manifest.get("row_count") != expected_manifest_rows:
+            raise EvaluationError("locked freeze manifest.row_count does not match spec")
         split_counts = frozen_manifest.get("split_counts")
-        if not isinstance(split_counts, Mapping) or dict(split_counts) != EXPECTED_SPLIT_COUNTS:
+        if not isinstance(split_counts, Mapping) or dict(split_counts) != spec.split_counts():
             raise EvaluationError(
-                f"locked freeze split_counts must be {EXPECTED_SPLIT_COUNTS}"
+                "locked freeze split_counts does not match spec"
             )
-        expected_locked_ids = sorted(_canonical_primary_paths("locked_test"))
+        expected_locked_ids = sorted(spec.locked_sample_ids())
         locked_ids = frozen_manifest.get("locked_sample_ids")
         if (
             not isinstance(locked_ids, list)
@@ -336,13 +373,18 @@ def _validate_frozen_config(
         validation = parsed_config.get("dataset_validation")
         if not isinstance(validation, Mapping):
             raise EvaluationError("locked freeze dataset_validation evidence is missing")
+        try:
+            from scripts.validate_dataset import expected_dataset_artifacts
+        except ModuleNotFoundError:  # pragma: no cover - direct script fallback
+            from validate_dataset import expected_dataset_artifacts  # type: ignore[no-redef]
+        expected_wavs = len(expected_dataset_artifacts(spec))
         expected_validation = {
             "validator_id": DATASET_VALIDATOR_ID,
             "validator_version": DATASET_VALIDATOR_VERSION,
-            "checked_wavs": EXPECTED_DATASET_WAVS,
-            "expected_wavs": EXPECTED_DATASET_WAVS,
-            "manifest_rows": EXPECTED_MANIFEST_ROWS,
-            "hashes_verified": EXPECTED_MANIFEST_ROWS,
+            "checked_wavs": expected_wavs,
+            "expected_wavs": expected_wavs,
+            "manifest_rows": expected_manifest_rows,
+            "hashes_verified": expected_manifest_rows,
         }
         for key, expected in expected_validation.items():
             if validation.get(key) != expected:
@@ -442,6 +484,7 @@ def _validate_frozen_config(
 
         dataset_id, dataset_identity = _build_locked_dataset_identity(
             locked_samples=locked_samples,
+            expected_ids=expected_locked_ids,
         )
         receipt_path = LOCKED_RECEIPT_ROOT / f"{dataset_id}.json"
         return FrozenIdentity(
@@ -452,32 +495,21 @@ def _validate_frozen_config(
             receipt_path=receipt_path,
             payload=parsed_config,
         )
-    return {"path": str(path), "sha256": hashlib.sha256(raw_bytes).hexdigest()}
+    return {"role": "frozen_config", "sha256": hashlib.sha256(raw_bytes).hexdigest()}
 
 
 def _resolve_in_root(dataset_root: Path, raw_path: str) -> Path:
-    value = raw_path.strip()
-    if not value:
-        raise ValueError("manifest audio path is empty")
-    supplied = Path(value)
-    if supplied.is_absolute():
-        resolved = supplied.resolve()
-    else:
-        if supplied.parts and supplied.parts[0] == dataset_root.name:
-            supplied = Path(*supplied.parts[1:])
-        resolved = (dataset_root / supplied).resolve()
     try:
-        resolved.relative_to(dataset_root)
-    except ValueError as exc:
-        raise ValueError(f"manifest audio path escapes dataset root: {raw_path}") from exc
-    return resolved
+        return safe_join(dataset_root, raw_path, must_exist=True)
+    except DatasetSpecError as exc:
+        raise ValueError("manifest audio path is unsafe") from exc
 
 
 def _read_manifest_snapshot(manifest_path: Path) -> ManifestSnapshot:
     """Parse and hash one immutable byte snapshot of the manifest."""
 
     if not manifest_path.is_file():
-        raise EvaluationError(f"manifest does not exist: {manifest_path}")
+        raise EvaluationError("manifest does not exist")
     try:
         raw_bytes = manifest_path.read_bytes()
         text = raw_bytes.decode("utf-8-sig")
@@ -499,7 +531,7 @@ def _read_manifest_snapshot(manifest_path: Path) -> ManifestSnapshot:
     except EvaluationError:
         raise
     except (csv.Error, OSError, UnicodeError) as exc:
-        raise EvaluationError(f"cannot read manifest: {manifest_path}: {exc}") from exc
+        raise EvaluationError("cannot read manifest") from exc
     if not rows:
         raise EvaluationError("manifest is empty")
     return ManifestSnapshot(
@@ -510,85 +542,72 @@ def _read_manifest_snapshot(manifest_path: Path) -> ManifestSnapshot:
     )
 
 
-def _canonical_primary_paths(split: str) -> dict[str, str]:
-    """Return the fixed sample-id to primary-path map for one dataset split."""
+def _canonical_primary_paths(split: str, spec: DatasetSpec) -> dict[str, str]:
+    """Return the selected spec's sample-id to primary-path map for one split."""
 
-    try:
-        from scripts.validate_dataset import (
-            expected_dataset_artifacts,
-            required_manifest_primary_paths,
-        )
-    except ModuleNotFoundError:  # pragma: no cover - direct script fallback
-        from validate_dataset import (  # type: ignore[no-redef]
-            expected_dataset_artifacts,
-            required_manifest_primary_paths,
-        )
-
-    artifacts = expected_dataset_artifacts()
+    clean_by_id = spec.clean_by_id
     expected: dict[str, str] = {}
-    for relative_path in required_manifest_primary_paths():
-        spec = artifacts[relative_path]
-        canonical_split = (
-            "clean_control"
-            if spec.kind == "clean"
-            else "real"
-            if spec.kind == "real"
-            else spec.split
-        )
-        if canonical_split == split:
-            expected[relative_path.stem] = relative_path.as_posix()
+    for item in spec.mixes:
+        if item.split == split:
+            expected[item.sample_id] = item.path.as_posix()
+    for item in spec.clean_controls:
+        if item.split == split:
+            expected[item.sample_id] = clean_by_id[item.clean_id].path.as_posix()
+    for item in spec.real_recordings:
+        if item.split == split:
+            expected[item.sample_id] = item.path.as_posix()
     return expected
 
 
-def _load_split_rows(snapshot: ManifestSnapshot, split: str) -> list[dict[str, str]]:
+def _expected_locked_flags(spec: DatasetSpec) -> dict[str, bool]:
+    flags: dict[str, bool] = {}
+    for item in (*spec.mixes, *spec.clean_controls, *spec.real_recordings):
+        flags[item.sample_id] = item.is_locked
+    return flags
+
+
+def _load_split_rows(
+    snapshot: ManifestSnapshot,
+    split: str,
+    spec: DatasetSpec,
+) -> list[dict[str, str]]:
     rows = [row for row in snapshot.rows if row.get("split") == split]
     if not rows:
         raise EvaluationError(f"manifest contains no rows for split {split!r}")
-    expected_count = EXPECTED_SPLIT_COUNTS[split]
+    expected_paths = _canonical_primary_paths(split, spec)
+    if not expected_paths:
+        raise EvaluationError("requested split is not declared by dataset spec")
+    expected_count = len(expected_paths)
     if len(rows) != expected_count:
         raise EvaluationError(
-            f"split {split!r} must contain exactly {expected_count} rows, got {len(rows)}"
+            "manifest split row count does not match dataset spec"
         )
 
-    expected_paths = _canonical_primary_paths(split)
-    if len(expected_paths) != expected_count:
-        raise EvaluationError(
-            f"internal canonical split matrix for {split!r} is incomplete"
-        )
     seen_ids: set[str] = set()
     seen_paths: set[str] = set()
     for row in rows:
         sample_id = row.get("sample_id", "")
         if not sample_id:
-            raise EvaluationError(f"split {split!r} contains an empty sample_id")
+            raise EvaluationError("manifest split contains an empty sample_id")
         if sample_id in seen_ids:
-            raise EvaluationError(f"split {split!r} contains duplicate sample_id {sample_id!r}")
+            raise EvaluationError("manifest split contains duplicate sample_id")
         seen_ids.add(sample_id)
         expected_path = expected_paths.get(sample_id)
         if expected_path is None:
-            raise EvaluationError(
-                f"sample {sample_id!r} is not part of the canonical {split!r} split"
-            )
+            raise EvaluationError("manifest sample_id is not declared by dataset spec")
         actual_path = _select_audio_path(row).replace("\\", "/")
         while actual_path.startswith("./"):
             actual_path = actual_path[2:]
         if actual_path.startswith(snapshot.path.parent.name + "/"):
             actual_path = actual_path.split("/", 1)[1]
         if actual_path != expected_path:
-            raise EvaluationError(
-                f"sample {sample_id!r} primary path must be {expected_path!r}, "
-                f"got {actual_path!r}"
-            )
+            raise EvaluationError("manifest primary path does not match dataset spec")
         if actual_path in seen_paths:
-            raise EvaluationError(
-                f"split {split!r} reuses primary audio path {actual_path!r}"
-            )
+            raise EvaluationError("manifest split reuses a primary audio path")
         seen_paths.add(actual_path)
     missing_ids = sorted(set(expected_paths) - seen_ids)
     if missing_ids:
-        raise EvaluationError(
-            f"split {split!r} is missing canonical sample IDs: {', '.join(missing_ids)}"
-        )
+        raise EvaluationError("manifest split is missing sample IDs declared by spec")
     return rows
 
 
@@ -604,19 +623,18 @@ def _parse_locked_flag(value: str, *, sample_id: str) -> bool:
         return True
     if normalized in {"0", "false", "no"}:
         return False
-    raise EvaluationError(
-        f"sample {sample_id!r} has invalid is_locked value {value!r}"
-    )
+    raise EvaluationError("manifest is_locked value is invalid")
 
 
 def _prepare_samples(
     rows: Sequence[dict[str, str]],
     dataset_root: Path,
     split: str,
+    spec: DatasetSpec,
 ) -> list[PreparedSample]:
     """Resolve and hash every selected input before any pipeline call."""
 
-    expected_locked = split in {"locked_test", "clean_control"}
+    expected_locked_by_id = _expected_locked_flags(spec)
     prepared: list[PreparedSample] = []
     for row in rows:
         sample_id = row["sample_id"]
@@ -624,36 +642,34 @@ def _prepare_samples(
             row.get("is_locked", ""),
             sample_id=sample_id,
         )
-        if actual_locked is not expected_locked:
+        expected_locked = expected_locked_by_id.get(sample_id)
+        if expected_locked is None or actual_locked is not expected_locked:
             raise EvaluationError(
-                f"sample {sample_id!r} is_locked must be "
-                f"{str(expected_locked).lower()} for split {split!r}"
+                "manifest is_locked does not match dataset spec"
             )
         reference_text = row.get("reference_text", "")
         if not reference_text:
-            raise EvaluationError(f"sample {sample_id!r} has empty reference_text")
+            raise EvaluationError("manifest reference_text is empty")
         try:
             input_path = _resolve_in_root(dataset_root, _select_audio_path(row))
         except ValueError as exc:
-            raise EvaluationError(f"sample {sample_id!r}: {exc}") from exc
+            raise EvaluationError("manifest input path is unsafe") from exc
         if not input_path.is_file():
-            raise EvaluationError(
-                f"sample {sample_id!r} input audio does not exist: {input_path}"
-            )
+            raise EvaluationError("manifest input audio does not exist")
         declared_hash = row.get("sha256", "")
         if not _is_hex_digest(declared_hash, 64):
             raise EvaluationError(
-                f"sample {sample_id!r} sha256 must be a 64-character digest"
+                "manifest sha256 must be a 64-character digest"
             )
         try:
             actual_hash = sha256_file(input_path)
         except OSError as exc:
             raise EvaluationError(
-                f"cannot hash sample {sample_id!r} at {input_path}: {exc}"
+                "cannot hash manifest input audio"
             ) from exc
         if declared_hash.lower() != actual_hash:
             raise EvaluationError(
-                f"sample {sample_id!r} sha256 does not match input audio"
+                "manifest sha256 does not match input audio"
             )
         prepared.append(
             PreparedSample(
@@ -665,8 +681,12 @@ def _prepare_samples(
     return prepared
 
 
-def _validate_full_dataset(dataset_root: Path, manifest_path: Path) -> None:
-    """Re-run the authoritative 42-WAV/33-row validator before gated runs."""
+def _validate_full_dataset(
+    dataset_root: Path,
+    manifest_path: Path,
+    spec: DatasetSpec,
+) -> None:
+    """Re-run the authoritative validator before evaluation."""
 
     try:
         from scripts.validate_dataset import validate_dataset
@@ -674,9 +694,9 @@ def _validate_full_dataset(dataset_root: Path, manifest_path: Path) -> None:
         from validate_dataset import validate_dataset  # type: ignore[no-redef]
 
     try:
-        report = validate_dataset(dataset_root, manifest_path)
+        report = validate_dataset(dataset_root, manifest_path, spec=spec)
     except Exception as exc:
-        raise EvaluationError(f"dataset validator could not complete: {exc}") from exc
+        raise EvaluationError("dataset validator could not complete") from exc
     if report.errors:
         preview = "; ".join(
             f"{issue.code} {issue.path}: {issue.message}" for issue in report.errors[:5]
@@ -684,11 +704,12 @@ def _validate_full_dataset(dataset_root: Path, manifest_path: Path) -> None:
         raise EvaluationError(
             f"dataset validation failed with {len(report.errors)} error(s): {preview}"
         )
+    expected_manifest_rows = sum(spec.split_counts().values())
     expected_counts = {
-        "checked_wavs": EXPECTED_DATASET_WAVS,
-        "expected_wavs": EXPECTED_DATASET_WAVS,
-        "manifest_rows": EXPECTED_MANIFEST_ROWS,
-        "hashes_verified": EXPECTED_MANIFEST_ROWS,
+        "checked_wavs": report.expected_wavs,
+        "expected_wavs": report.expected_wavs,
+        "manifest_rows": expected_manifest_rows,
+        "hashes_verified": expected_manifest_rows,
     }
     for name, expected in expected_counts.items():
         if getattr(report, name, None) != expected:
@@ -716,11 +737,11 @@ def _stage_locked_inputs(
     try:
         staging.mkdir(parents=True, exist_ok=False)
     except OSError as exc:
-        raise EvaluationError(f"cannot create locked input staging directory: {exc}") from exc
+        raise EvaluationError("cannot create locked input staging directory") from exc
     staged: list[PreparedSample] = []
     try:
         for index, sample in enumerate(samples, start=1):
-            staged_path = staging / f"{index:02d}_{sample.row['sample_id']}.wav"
+            staged_path = staging / f"{index:02d}.wav"
             shutil.copyfile(sample.input_path, staged_path)
             actual_hash = sha256_file(staged_path)
             if actual_hash != sample.sha256:
@@ -753,8 +774,7 @@ def _ensure_private_output(dataset_root: Path, destination: Path) -> None:
         destination.relative_to(dataset_root)
     except ValueError as exc:
         raise EvaluationError(
-            "evaluation output inside the repository must stay under the private "
-            f"dataset root: {dataset_root}"
+            "evaluation output inside the repository must stay under the private dataset root"
         ) from exc
 
     try:
@@ -762,30 +782,35 @@ def _ensure_private_output(dataset_root: Path, destination: Path) -> None:
     except ValueError:
         return
     ignored = subprocess.run(
-        ["git", "check-ignore", "-q", str(dataset_root)],
+        ["git", "check-ignore", "-q", "--", dataset_root.relative_to(project_root).as_posix()],
         cwd=project_root,
         check=False,
         capture_output=True,
     )
     if ignored.returncode != 0:
         raise EvaluationError(
-            f"dataset root is inside the repository but is not ignored by Git: {dataset_root}"
+            "dataset root inside the repository must be ignored by Git"
         )
 
 
 def _validate_output_dir(output_dir: Path, overwrite: bool) -> None:
     if output_dir.exists():
         if not output_dir.is_dir():
-            raise EvaluationError(f"output path exists and is not a directory: {output_dir}")
+            raise EvaluationError("output path exists and is not a directory")
         if not overwrite:
             raise EvaluationError(
-                f"output directory already exists: {output_dir}; use --overwrite explicitly"
+                "output directory already exists; use --overwrite explicitly"
             )
 
 
-def locked_receipt_path(frozen_config: str | Path) -> Path:
+def locked_receipt_path(
+    frozen_config: str | Path,
+    *,
+    dataset_spec: str | Path | DatasetSpec | None = None,
+) -> Path:
     """Derive the data-only receipt path from a freeze and its frozen manifest."""
 
+    loaded_spec = _load_evaluation_spec(dataset_spec).spec
     freeze_path = Path(frozen_config).expanduser().resolve()
     try:
         payload = json.loads(freeze_path.read_text(encoding="utf-8"))
@@ -802,10 +827,14 @@ def locked_receipt_path(frozen_config: str | Path) -> Path:
         manifest_dataset_version = _manifest_dataset_version(snapshot)
         if payload["dataset_version"] != manifest_dataset_version:
             raise EvaluationError("freeze dataset_version does not match manifest")
-        locked_rows = _load_split_rows(snapshot, "locked_test")
+        locked_rows = _load_split_rows(snapshot, "locked_test", loaded_spec)
         dataset_id, _ = _build_locked_dataset_identity(
             locked_samples=[
                 (row["sample_id"], row.get("sha256", "")) for row in locked_rows
+            ],
+            expected_ids=[
+                sample_id
+                for sample_id, path in _canonical_primary_paths("locked_test", loaded_spec).items()
             ],
         )
     except (
@@ -818,7 +847,7 @@ def locked_receipt_path(frozen_config: str | Path) -> Path:
         json.JSONDecodeError,
     ) as exc:
         raise EvaluationError(
-            f"cannot derive canonical locked receipt from {freeze_path}: {exc}"
+            "cannot derive canonical locked receipt"
         ) from exc
     return LOCKED_RECEIPT_ROOT / f"{dataset_id}.json"
 
@@ -839,10 +868,10 @@ def _write_started_receipt(path: Path, payload: Mapping[str, Any]) -> None:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
         raise EvaluationError(
-            f"locked_test freeze record has already been consumed: {path}"
+            "locked_test freeze record has already been consumed"
         ) from exc
     except OSError as exc:
-        raise EvaluationError(f"cannot create locked_test receipt {path}: {exc}") from exc
+        raise EvaluationError("cannot create locked_test receipt") from exc
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
@@ -850,7 +879,7 @@ def _write_started_receipt(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
     except OSError as exc:
         # Never unlink: once O_EXCL succeeds, this one-shot attempt is consumed.
-        raise EvaluationError(f"cannot persist started receipt {path}: {exc}") from exc
+        raise EvaluationError("cannot persist started receipt") from exc
 
 
 def _require_completed_locked_receipt(identity: FrozenIdentity) -> None:
@@ -863,9 +892,9 @@ def _require_completed_locked_receipt(identity: FrozenIdentity) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
         json.dumps(payload, allow_nan=False)
     except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise EvaluationError(f"locked_test receipt is invalid: {path}: {exc}") from exc
+        raise EvaluationError("locked_test receipt is invalid") from exc
     if not isinstance(payload, Mapping):
-        raise EvaluationError(f"locked_test receipt is not a JSON object: {path}")
+        raise EvaluationError("locked_test receipt is not a JSON object")
     if payload.get("receipt_schema_version") != RECEIPT_SCHEMA_VERSION:
         raise EvaluationError(
             f"locked_test receipt schema must be {RECEIPT_SCHEMA_VERSION!r}"
@@ -1043,6 +1072,7 @@ def run_evaluation(
     *,
     manifest_path: str | Path,
     dataset_root: str | Path,
+    dataset_spec: str | Path | DatasetSpec | None = None,
     split: str,
     output_dir: str | Path,
     frozen_config: str | Path | None = None,
@@ -1056,8 +1086,10 @@ def run_evaluation(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate one manifest split and persist index plus aggregate summary."""
 
-    if split not in SPLITS:
-        raise EvaluationError(f"split must be one of: {', '.join(SPLITS)}")
+    loaded_dataset_spec = _load_evaluation_spec(dataset_spec)
+    spec = loaded_dataset_spec.spec
+    if split not in spec.split_counts():
+        raise EvaluationError("split must be declared by dataset spec")
     if isinstance(strength, bool) or not isinstance(strength, (int, float)):
         raise EvaluationError("strength must be a finite number from 0 to 1")
     strength = float(strength)
@@ -1084,31 +1116,31 @@ def run_evaluation(
             "locked_test formal API forbids injected process/runtime test hooks"
         )
 
-    manifest = Path(manifest_path).expanduser().resolve()
     root = Path(dataset_root).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
     if not root.is_dir():
-        raise EvaluationError(f"dataset root is not a directory: {root}")
+        raise EvaluationError("dataset root is not a directory")
+    manifest = _safe_manifest_path(root, manifest_path)
     _ensure_private_output(root, destination)
 
     manifest_snapshot = _read_manifest_snapshot(manifest)
     manifest_dataset_version = _manifest_dataset_version(manifest_snapshot)
-    rows = _load_split_rows(manifest_snapshot, split)
+    _validate_full_dataset(root, manifest, spec)
+    rows = _load_split_rows(manifest_snapshot, split, spec)
     manifest_sha256 = manifest_snapshot.sha256
-    prepared_samples = _prepare_samples(rows, root, split)
+    prepared_samples = _prepare_samples(rows, root, split, spec)
     current_runtime: RuntimeIdentity | None = None
     locked_identity_samples: list[tuple[str, str]] = []
     if split in INTEGRITY_GATED_SPLITS:
-        locked_rows = _load_split_rows(manifest_snapshot, "locked_test")
+        locked_rows = _load_split_rows(manifest_snapshot, "locked_test", spec)
         locked_prepared = (
             prepared_samples
             if split == "locked_test"
-            else _prepare_samples(locked_rows, root, "locked_test")
+            else _prepare_samples(locked_rows, root, "locked_test", spec)
         )
         locked_identity_samples = [
             (sample.row["sample_id"], sample.sha256) for sample in locked_prepared
         ]
-        _validate_full_dataset(root, manifest)
         current_runtime = (
             _inspect_runtime_identity()
             if runtime_identity is None
@@ -1118,6 +1150,7 @@ def run_evaluation(
         split,
         frozen_config,
         confirm_locked,
+        spec=spec,
         manifest_sha256=manifest_sha256,
         manifest_path=manifest,
         manifest_dataset_version=manifest_dataset_version,
@@ -1136,8 +1169,7 @@ def run_evaluation(
             receipt_path = frozen_identity.receipt_path
         if split == "locked_test" and frozen_identity.receipt_path.exists():
             raise EvaluationError(
-                "locked_test dataset has already been consumed: "
-                f"{frozen_identity.receipt_path}"
+                "locked_test dataset has already been consumed"
             )
         if split == "clean_control":
             _require_completed_locked_receipt(frozen_identity)
@@ -1147,12 +1179,12 @@ def run_evaluation(
         try:
             from core.pipeline import process_audio as process_callable
         except Exception as exc:
-            raise EvaluationError(f"cannot import core.pipeline.process_audio: {exc}") from exc
+            raise EvaluationError("cannot import core.pipeline.process_audio") from exc
 
     try:
         destination.mkdir(parents=True, exist_ok=overwrite)
     except OSError as exc:
-        raise EvaluationError(f"cannot create output directory {destination}: {exc}") from exc
+        raise EvaluationError("cannot create output directory") from exc
 
     config_snapshot_path: Path | None = None
     if split == "locked_test":
@@ -1179,17 +1211,17 @@ def run_evaluation(
 
     if isinstance(frozen_identity, FrozenIdentity):
         frozen_public_identity: dict[str, str] | None = {
-            "path": str(frozen_identity.path),
+            "role": "frozen_config",
             "sha256": frozen_identity.file_sha256,
             "locked_dataset_id": frozen_identity.dataset_id,
-            "receipt_path": str(frozen_identity.receipt_path),
+            "receipt_role": "locked_receipt",
         }
     else:
         frozen_public_identity = frozen_identity
 
     generated_at = _utc_now()
     manifest_identity = {
-        "path": str(manifest),
+        "path": root_relative_label(root, manifest),
         "sha256": manifest_sha256,
         "dataset_version": manifest_dataset_version,
     }
@@ -1203,7 +1235,7 @@ def run_evaluation(
             "started_at": generated_at,
             "split": "locked_test",
             "freeze": {
-                "path": frozen_public_identity["path"],
+                "role": frozen_public_identity["role"],
                 "sha256": frozen_public_identity["sha256"],
             },
             "locked_dataset": {
@@ -1226,10 +1258,10 @@ def run_evaluation(
             "manifest": manifest_identity,
             "runtime": {
                 "git_commit": current_runtime.git_commit,
-                "config_path": current_runtime.config_path,
+                "config_role": "pipeline_config",
                 "config_sha256": current_runtime.config_sha256,
             },
-            "output_dir": str(destination),
+            "output_role": "evaluation_output",
             "sample_ids": [sample.row["sample_id"] for sample in prepared_samples],
         }
         _write_started_receipt(receipt_path, started_receipt)
@@ -1250,7 +1282,7 @@ def run_evaluation(
                 "noise_type": row.get("noise_type", ""),
                 "snr_db": row.get("snr_db", ""),
                 "reference_text": row.get("reference_text", ""),
-                "input_path": str(input_path),
+                "input_path": root_relative_label(root, input_path),
                 "status": "failed",
                 "cer_before": None,
                 "cer_after": None,
@@ -1312,7 +1344,10 @@ def run_evaluation(
             "schema_version": SCHEMA_VERSION,
             "generated_at": generated_at,
             "split": split,
-            "dataset_root": str(root),
+            "dataset_root": "<dataset_root>",
+            "dataset_spec": {
+                "sha256": loaded_dataset_spec.sha256,
+            },
             "manifest": manifest_identity,
             "frozen_config": frozen_public_identity,
             "options": {
@@ -1361,7 +1396,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--split", choices=SPLITS, required=True)
+    parser.add_argument("--dataset-spec", type=Path)
+    parser.add_argument("--split", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--frozen-config", type=Path)
     parser.add_argument("--confirm-locked", action="store_true")
@@ -1379,6 +1415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _, summary = run_evaluation(
             manifest_path=args.manifest,
             dataset_root=dataset_root,
+            dataset_spec=args.dataset_spec,
             split=args.split,
             output_dir=args.output_dir,
             frozen_config=args.frozen_config,
@@ -1389,7 +1426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             force_recompute=args.force_recompute,
         )
     except EvaluationError as exc:
-        print(f"Evaluation refused: {exc}")
+        print("Evaluation refused: EVALUATION_INPUT_INVALID")
         return 2
 
     print(

@@ -3,6 +3,10 @@
   "sample_rate": 48000,
   "channels": 1,
   "sample_width_bytes": 2,
+  "protected_splits": [
+    "holdout",
+    "clean_control"
+  ],
   "consent_tokens": {
     "pending": "pending_local_authorization",
     "approved": "approved_for_evaluation"

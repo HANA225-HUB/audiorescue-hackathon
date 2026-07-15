@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.build_dataset import APPROVED_CONSENT_TOKEN, build_dataset
-from scripts.dataset_spec import load_dataset_spec
+from scripts.dataset_spec import DatasetSpecError, load_dataset_spec, load_example_dataset_spec
 from scripts.validate_dataset import (
     DEFAULT_POLICY,
     MANIFEST_FIELDS,
@@ -84,7 +84,7 @@ class WavInspectionTest(unittest.TestCase):
             noise_min_seconds=0.01,
             noise_max_seconds=1.0,
         )
-        self.spec = load_dataset_spec()
+        self.spec = load_example_dataset_spec()
         self.artifact = expected_dataset_artifacts(self.spec)[
             Path("raw/clean/speaker_1/sample_clean_1.wav")
         ]
@@ -191,6 +191,29 @@ class ManifestValidationTest(unittest.TestCase):
             self.assertIn("MANIFEST_DUPLICATE_PATH", codes)
             self.assertIn("MANIFEST_HASH", codes)
 
+    def test_requires_explicit_spec_for_dataset_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(DatasetSpecError, "explicit dataset spec"):
+                validate_dataset(Path(temp_dir))
+
+    def test_manifest_argument_must_stay_inside_dataset_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json")
+            root = temp / "data_local"
+            rows = self.build_fixture(root, spec_path)
+            external_manifest = temp / "external_manifest.csv"
+            write_manifest(external_manifest, rows)
+
+            report = validate_dataset(
+                root,
+                manifest_path=external_manifest,
+                spec_path=spec_path,
+                policy=self.policy,
+            )
+
+            self.assertIn("MANIFEST_PATH", {issue.code for issue in report.errors})
+
     def test_rejects_traversal_symlink_hash_split_and_consent_errors(self) -> None:
         cases = [
             ("traversal", "mixed_path", "../outside.wav", "MANIFEST_PATH"),
@@ -229,7 +252,32 @@ class ManifestValidationTest(unittest.TestCase):
                 return original_is_symlink(path)
 
             with mock.patch.object(Path, "is_symlink", fake_is_symlink):
-                self.assertIn("MANIFEST_SYMLINK", self.validate_rows(root, spec_path, rows))
+                self.assertIn("MANIFEST_PATH", self.validate_rows(root, spec_path, rows))
+
+    def test_rejects_controlled_source_path_deletion_replacement_and_type_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json")
+            root = temp / "data_local"
+            base_rows = self.build_fixture(root, spec_path)
+            alternate = root / "raw" / "clean" / "speaker_2" / "sample_clean_2.wav"
+            self.assertTrue(alternate.is_file())
+
+            cases = [
+                ("missing_clean", "clean_path", "", "MANIFEST_SOURCE_PATH"),
+                (
+                    "replaced_clean",
+                    "clean_path",
+                    "raw/clean/speaker_2/sample_clean_2.wav",
+                    "MANIFEST_SOURCE_PATH",
+                ),
+                ("wrong_source_type", "source_type", "real", "MANIFEST_SOURCE_TYPE"),
+            ]
+            for label, field_name, value, expected_code in cases:
+                with self.subTest(label=label):
+                    rows = [dict(row) for row in base_rows]
+                    rows[0][field_name] = value
+                    self.assertIn(expected_code, self.validate_rows(root, spec_path, rows))
 
     def test_complete_synthetic_fixture_passes_with_spec(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -264,9 +312,26 @@ class ManifestValidationTest(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 exit_code = main([temp_dir])
-            self.assertEqual(exit_code, 1)
-            self.assertIn("AudioRescue dataset validation: FAIL", output.getvalue())
-            self.assertIn("Errors:", output.getvalue())
+            self.assertEqual(exit_code, 2)
+            rendered = output.getvalue()
+            self.assertIn("Dataset validation refused", rendered)
+            self.assertNotIn(temp_dir, rendered)
+
+    def test_report_rendering_uses_root_relative_paths_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json")
+            root = temp / "data_local"
+            rows = self.build_fixture(root, spec_path)
+            rows[0]["mixed_path"] = "../outside.wav"
+            write_manifest(root / "manifest.csv", rows)
+
+            report = validate_dataset(root, spec_path=spec_path, policy=self.policy)
+            rendered = report.render()
+
+            self.assertIn("AudioRescue dataset validation: FAIL", rendered)
+            self.assertNotIn(temp_dir, rendered)
+            self.assertNotIn(Path(temp_dir).as_posix().replace("/", "%2F"), rendered)
 
 
 if __name__ == "__main__":

@@ -20,12 +20,18 @@ from scripts.build_dataset import (
     mix_pcm16,
     read_pcm16_mono,
 )
+from scripts.dataset_spec import DatasetSpecError
 from scripts.dataset_spec import load_dataset_spec
 
 try:
     from tests.test_dataset_spec import write_synthetic_spec
+    from tests.test_dataset_spec import synthetic_spec_payload
 except ModuleNotFoundError:
     from test_dataset_spec import write_synthetic_spec
+    from test_dataset_spec import synthetic_spec_payload
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def write_test_wav(
@@ -124,6 +130,32 @@ class MixPcm16Test(unittest.TestCase):
 
 
 class BuildDatasetTest(unittest.TestCase):
+    def test_requires_explicit_spec_unless_example_mode_is_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "data_local"
+
+            with self.assertRaisesRegex(DatasetBuildError, "explicit dataset spec"):
+                build_dataset(root)
+
+    def test_default_consent_uses_selected_spec_pending_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            payload = synthetic_spec_payload()
+            payload["consent_tokens"] = {
+                "pending": "pending_custom_token",
+                "approved": "approved_custom_token",
+            }
+            root = temp / "data_local"
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json", payload)
+            make_sources(root, spec_path)
+
+            rows = build_dataset(root, spec_path=spec_path)
+
+            self.assertEqual(
+                {row["consent_or_license"] for row in rows},
+                {"pending_custom_token"},
+            )
+
     def test_builds_from_explicit_synthetic_spec(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "data_local"
@@ -225,6 +257,54 @@ class BuildDatasetTest(unittest.TestCase):
                 {row["consent_or_license"] for row in rows},
                 {PENDING_CONSENT_TOKEN},
             )
+
+    def test_rejects_unignored_repository_root_before_any_write(self) -> None:
+        unsafe = PROJECT_ROOT / "unsafe_dataset_build_unit_test"
+        self.assertFalse(unsafe.exists())
+        with self.assertRaisesRegex(DatasetBuildError, "ignored by Git"):
+            build_dataset(unsafe, example_mode=True)
+        self.assertFalse(unsafe.exists())
+
+    def test_rejects_symlink_escape_before_reading_source_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            payload = synthetic_spec_payload()
+            root = temp / "data_local"
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json", payload)
+            outside = temp / "outside"
+            outside_clean = outside / "speaker_1"
+            outside_clean.mkdir(parents=True)
+            write_test_wav(outside_clean / "sample_clean_1.wav", [1, -1] * 600)
+            root.mkdir()
+            clean_parent = root / "raw" / "clean"
+            clean_parent.parent.mkdir(parents=True)
+            try:
+                clean_parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(DatasetBuildError, "unsafe path"):
+                build_dataset(root, spec_path=spec_path)
+
+    def test_rejects_symlink_escape_before_writing_mixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "data_local"
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json")
+            make_sources(root, spec_path)
+            outside = temp / "outside"
+            outside.mkdir()
+            controlled = root / "controlled"
+            controlled.mkdir(exist_ok=True)
+            controlled.rmdir()
+            try:
+                controlled.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(DatasetBuildError, "unsafe path"):
+                build_dataset(root, spec_path=spec_path)
+            self.assertEqual(list(outside.rglob("*.wav")), [])
 
     def test_formal_consent_requires_spec_masters_not_fixed_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.dataset_spec import DatasetSpecError
 from scripts.init_dataset import PROJECT_ROOT, initialize_dataset
 
 try:
@@ -12,6 +13,16 @@ except ModuleNotFoundError:
 
 
 class InitDatasetTest(unittest.TestCase):
+    def test_requires_explicit_spec_unless_example_mode_is_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "data_local"
+
+            with self.assertRaisesRegex(DatasetSpecError, "explicit dataset spec"):
+                initialize_dataset(root)
+
+            report = initialize_dataset(root, example_mode=True)
+            self.assertEqual(report.root, root.resolve())
+
     def test_creates_neutral_workspace_templates_from_spec(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -59,7 +70,9 @@ class InitDatasetTest(unittest.TestCase):
                 {row["source_type"] for row in metadata},
                 {"clean", "noise", "real"},
             )
-            self.assertTrue(all(row["consent_status"] == "pending" for row in metadata))
+            self.assertTrue(
+                all(row["consent_status"] == "pending_local_authorization" for row in metadata)
+            )
             self.assertEqual(list(root.rglob("*.wav")), [])
 
             rendered = "\n".join(path.read_text(encoding="utf-8") for path in root.glob("*.*"))
@@ -88,17 +101,36 @@ class InitDatasetTest(unittest.TestCase):
 
     def test_rejects_file_as_dataset_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            spec_path = write_synthetic_spec(Path(temp_dir) / "dataset_spec.json")
             root = Path(temp_dir) / "not-a-directory"
             root.write_text("x", encoding="utf-8")
             with self.assertRaises(NotADirectoryError):
-                initialize_dataset(root)
+                initialize_dataset(root, spec_path=spec_path)
 
     def test_rejects_unignored_private_root_inside_repository(self) -> None:
         unsafe = PROJECT_ROOT / "unsafe_recordings_unit_test"
         self.assertFalse(unsafe.exists())
         with self.assertRaisesRegex(ValueError, "ignored by Git"):
-            initialize_dataset(unsafe)
+            initialize_dataset(unsafe, example_mode=True)
         self.assertFalse(unsafe.exists())
+
+    def test_rejects_symlink_escape_before_creating_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            spec_path = write_synthetic_spec(temp / "dataset_spec.json")
+            root = temp / "data_local"
+            outside = temp / "outside"
+            root.mkdir()
+            outside.mkdir()
+            link = root / "raw"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "unsafe path"):
+                initialize_dataset(root, spec_path=spec_path)
+            self.assertEqual(list(outside.rglob("*")), [])
 
 
 if __name__ == "__main__":

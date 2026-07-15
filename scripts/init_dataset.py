@@ -10,11 +10,16 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.dataset_spec import DatasetSpec, load_dataset_spec
+from scripts.dataset_spec import (
+    DatasetSpec,
+    DatasetSpecError,
+    ensure_private_repo_root,
+    load_dataset_spec,
+    safe_join,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,7 +87,7 @@ def _metadata_rows(spec: DatasetSpec) -> list[dict[str, str]]:
                 "recording_date": "TODO",
                 "recorder": "TODO",
                 "distance_cm": "TODO",
-                "consent_status": "pending",
+                "consent_status": spec.consent_tokens.pending,
                 "source_original_sha256": "",
                 "standardized_sha256": "",
                 "notes": "",
@@ -103,7 +108,7 @@ def _metadata_rows(spec: DatasetSpec) -> list[dict[str, str]]:
                 "recording_date": "TODO",
                 "recorder": "TODO",
                 "distance_cm": "",
-                "consent_status": "pending",
+                "consent_status": spec.consent_tokens.pending,
                 "source_original_sha256": "",
                 "standardized_sha256": "",
                 "notes": "Avoid identifiable private speech.",
@@ -124,7 +129,7 @@ def _metadata_rows(spec: DatasetSpec) -> list[dict[str, str]]:
                 "recording_date": "TODO",
                 "recorder": "TODO",
                 "distance_cm": "TODO",
-                "consent_status": "pending",
+                "consent_status": spec.consent_tokens.pending,
                 "source_original_sha256": "",
                 "standardized_sha256": "",
                 "notes": "",
@@ -168,32 +173,27 @@ def _require_private_root(dataset_root: Path) -> None:
     """Refuse a repository-local dataset directory that Git could track."""
 
     try:
-        relative = dataset_root.relative_to(PROJECT_ROOT)
-    except ValueError:
-        return
-    check = subprocess.run(
-        ["git", "check-ignore", "-q", "--", relative.as_posix()],
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-    )
-    if check.returncode != 0:
+        ensure_private_repo_root(dataset_root, project_root=PROJECT_ROOT)
+    except DatasetSpecError as exc:
         raise ValueError(
             "dataset root inside the repository must be ignored by Git; "
             "use data_local/ or add an explicit ignore rule before initialization"
-        )
+        ) from exc
 
 
 def initialize_dataset(
     root: str | Path,
     *,
     spec_path: str | Path | None = None,
+    example_mode: bool = False,
 ) -> InitReport:
     """Create an idempotent private workspace without overwriting text or audio."""
 
-    spec = load_dataset_spec(spec_path)
     dataset_root = Path(root).expanduser().resolve()
     _require_private_root(dataset_root)
+    if dataset_root.exists() and not dataset_root.is_dir():
+        raise NotADirectoryError("dataset root is not a directory")
+    spec = load_dataset_spec(spec_path, allow_example=example_mode)
     created_directories: list[Path] = []
     created_files: list[Path] = []
     preserved_files: list[Path] = []
@@ -201,11 +201,12 @@ def initialize_dataset(
     if not dataset_root.exists():
         dataset_root.mkdir(parents=True)
         created_directories.append(dataset_root)
-    elif not dataset_root.is_dir():
-        raise NotADirectoryError(f"dataset root is not a directory: {dataset_root}")
 
     for relative in _directories(spec):
-        directory = dataset_root / relative
+        try:
+            directory = safe_join(dataset_root, relative)
+        except DatasetSpecError as exc:
+            raise ValueError("unsafe path declared by dataset spec") from exc
         if not directory.exists():
             directory.mkdir(parents=True)
             created_directories.append(directory)
@@ -249,6 +250,10 @@ def initialize_dataset(
         dataset_root / "LICENSES.md": _licenses_text(spec),
     }
     for path, content in templates.items():
+        try:
+            path = safe_join(dataset_root, path.relative_to(dataset_root))
+        except (DatasetSpecError, ValueError) as exc:
+            raise ValueError("unsafe path declared by dataset spec") from exc
         if path.exists():
             preserved_files.append(path)
             continue
@@ -269,13 +274,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--root", default="data_local")
     parser.add_argument("--spec", default=None, help="Local dataset spec JSON")
+    parser.add_argument(
+        "--example-spec",
+        action="store_true",
+        help="explicitly use the tracked synthetic example spec",
+    )
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
-    report = initialize_dataset(args.root, spec_path=args.spec)
-    print(f"Dataset workspace: {report.root}")
+    try:
+        report = initialize_dataset(
+            args.root,
+            spec_path=args.spec,
+            example_mode=args.example_spec,
+        )
+    except (DatasetSpecError, ValueError, NotADirectoryError):
+        print("Dataset initialization refused: DATASET_INPUT_INVALID")
+        return 2
+    print("Dataset workspace: <dataset_root>")
     print(f"Created directories: {len(report.created_directories)}")
     print(f"Created templates: {len(report.created_files)}")
     print(f"Preserved existing templates: {len(report.preserved_files)}")

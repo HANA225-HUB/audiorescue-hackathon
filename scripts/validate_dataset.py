@@ -20,8 +20,10 @@ from scripts.dataset_spec import (
     DEFAULT_APPROVED_CONSENT_TOKEN,
     DEFAULT_PENDING_CONSENT_TOKEN,
     DatasetSpec,
-    evaluation_compat_spec,
+    DatasetSpecError,
     load_dataset_spec,
+    root_relative_label,
+    safe_join,
 )
 from scripts.build_dataset import MANIFEST_FIELDS
 
@@ -108,13 +110,23 @@ class ValidationReport:
         return not self.errors
 
     def add(self, severity: str, code: str, path: str | Path, message: str) -> None:
-        self.issues.append(ValidationIssue(severity, code, str(path), message))
+        if isinstance(path, Path):
+            label = root_relative_label(self.root, path)
+        else:
+            label = str(path)
+            root_text = str(self.root)
+            root_posix = self.root.as_posix()
+            if root_text and root_text in label:
+                label = label.replace(root_text, "<dataset_root>")
+            if root_posix and root_posix in label:
+                label = label.replace(root_posix, "<dataset_root>")
+        self.issues.append(ValidationIssue(severity, code, label, message))
 
     def render(self) -> str:
         state = "PASS" if self.ok else "FAIL"
         lines = [
             f"AudioRescue dataset validation: {state}",
-            f"Root: {self.root}",
+            "Root: <dataset_root>",
             f"Required WAVs checked: {self.checked_wavs}/{self.expected_wavs}",
             f"Manifest rows: {self.manifest_rows}",
             f"SHA-256 values verified: {self.hashes_verified}",
@@ -136,7 +148,7 @@ def _coerce_spec(spec: DatasetSpec | str | Path | None) -> DatasetSpec:
     if isinstance(spec, DatasetSpec):
         return spec
     if spec is None:
-        return evaluation_compat_spec()
+        raise DatasetSpecError("explicit dataset spec is required")
     return load_dataset_spec(spec)
 
 
@@ -202,6 +214,9 @@ class _ExpectedRow:
     noise_type: str
     is_locked: bool
     is_demo_candidate: bool
+    clean_path: Path | None = None
+    noise_path: Path | None = None
+    mixed_path: Path | None = None
     snr_db: float | None = None
 
 
@@ -223,6 +238,9 @@ def _expected_manifest_rows(spec: DatasetSpec) -> dict[str, _ExpectedRow]:
             noise_type=noise.noise_type,
             is_locked=item.is_locked,
             is_demo_candidate=item.is_demo_candidate,
+            clean_path=clean.path,
+            noise_path=noise.path,
+            mixed_path=item.path,
             snr_db=item.snr_db,
         )
     for item in spec.clean_controls:
@@ -238,6 +256,9 @@ def _expected_manifest_rows(spec: DatasetSpec) -> dict[str, _ExpectedRow]:
             noise_type="",
             is_locked=item.is_locked,
             is_demo_candidate=item.is_demo_candidate,
+            clean_path=clean.path,
+            noise_path=None,
+            mixed_path=None,
         )
     for item in spec.real_recordings:
         expected[item.sample_id] = _ExpectedRow(
@@ -251,6 +272,9 @@ def _expected_manifest_rows(spec: DatasetSpec) -> dict[str, _ExpectedRow]:
             noise_type=item.noise_type,
             is_locked=item.is_locked,
             is_demo_candidate=item.is_demo_candidate,
+            clean_path=None,
+            noise_path=None,
+            mixed_path=item.path,
         )
     return expected
 
@@ -400,15 +424,10 @@ def _manifest_path(root: Path, raw_path: str) -> tuple[Path, Path] | None:
     value = raw_path.strip()
     if not value:
         return None
-    supplied = Path(value.replace("\\", "/"))
-    if supplied.is_absolute():
-        return None
-    if any(part in {"", ".", ".."} for part in supplied.parts):
-        return None
-    candidate = (root / supplied).resolve()
     try:
-        relative = candidate.relative_to(root.resolve())
-    except ValueError:
+        candidate = safe_join(root, value)
+        relative = candidate.relative_to(root.resolve(strict=False))
+    except (DatasetSpecError, ValueError):
         return None
     return relative, candidate
 
@@ -468,7 +487,7 @@ def validate_manifest(
                     for key, value in raw_row.items()
                     if key is not None
                 }
-                row_label = f"{manifest_path}:{line_number}"
+                row_label = f"{root_relative_label(root, manifest_path)}:{line_number}"
                 if None in raw_row:
                     add("MANIFEST_COLUMNS", row_label, "row has more values than the header")
 
@@ -497,8 +516,6 @@ def validate_manifest(
                         continue
                     relative, absolute = resolved
                     resolved_fields[field_name] = resolved
-                    if absolute.is_symlink():
-                        add("MANIFEST_SYMLINK", row_label, f"{field_name} must not be a symlink")
                     if not absolute.is_file():
                         add("MANIFEST_PATH", row_label, f"{field_name} does not exist")
 
@@ -521,16 +538,32 @@ def validate_manifest(
                     if primary_relative != expected.primary_path:
                         add("MANIFEST_PRIMARY_PATH", row_label, "primary path does not match spec")
                     expected_values = {
-                        "source_type": expected.source_type,
                         "split": expected.split,
                         "speaker_id": expected.speaker_id,
                         "sentence_id": expected.sentence_id,
                         "noise_type": expected.noise_type,
                     }
+                    if row.get("source_type", "") != expected.source_type:
+                        add("MANIFEST_SOURCE_TYPE", row_label, "source_type does not match spec")
                     for field_name, expected_value in expected_values.items():
                         code = "MANIFEST_SPLIT" if field_name == "split" else "MANIFEST_SEMANTICS"
                         if row.get(field_name, "") != expected_value:
                             add(code, row_label, f"{field_name} does not match spec")
+                    path_expectations = {
+                        "clean_path": expected.clean_path,
+                        "noise_path": expected.noise_path,
+                        "mixed_path": expected.mixed_path,
+                    }
+                    for field_name, expected_path in path_expectations.items():
+                        actual_raw = row.get(field_name, "")
+                        actual_resolved = resolved_fields.get(field_name)
+                        if expected_path is None:
+                            if actual_raw:
+                                add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} must be empty")
+                        elif actual_resolved is None:
+                            add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} is required")
+                        elif actual_resolved[0] != expected_path:
+                            add("MANIFEST_SOURCE_PATH", row_label, f"{field_name} does not match spec")
                     if row.get("reference_text", "") != expected.reference_text:
                         add("MANIFEST_REFERENCE", row_label, "reference_text does not match spec")
                     expected_normalized = normalize_reference(expected.reference_text)
@@ -656,7 +689,8 @@ def validate_dataset(
             continue
         report.checked_wavs += 1
         info, issues = inspect_wav(absolute, artifact, policy)
-        report.issues.extend(issues)
+        for issue in issues:
+            report.add(issue.severity, issue.code, issue.path, issue.message)
         if info is not None:
             wav_infos[relative] = info
 
@@ -675,18 +709,32 @@ def validate_dataset(
                     "WAV is not declared by the selected spec",
                 )
 
-    selected_manifest = (
-        Path(manifest_path).expanduser().resolve()
-        if manifest_path is not None
-        else dataset_root / "manifest.csv"
-    )
+    if manifest_path is None:
+        selected_manifest = dataset_root / "manifest.csv"
+    else:
+        supplied_manifest = Path(manifest_path).expanduser()
+        try:
+            if supplied_manifest.is_absolute():
+                manifest_relative = supplied_manifest.resolve().relative_to(dataset_root)
+            else:
+                manifest_relative = supplied_manifest
+            selected_manifest = safe_join(dataset_root, manifest_relative)
+        except (DatasetSpecError, ValueError):
+            report.add(
+                "error",
+                "MANIFEST_PATH",
+                "manifest.csv",
+                "manifest must stay inside dataset root",
+            )
+            return report
     manifest_issues, row_count, hash_count = validate_manifest(
         dataset_root,
         selected_manifest,
         wav_infos,
         spec=loaded,
     )
-    report.issues.extend(manifest_issues)
+    for issue in manifest_issues:
+        report.add(issue.severity, issue.code, issue.path, issue.message)
     report.manifest_rows = row_count
     report.hashes_verified = hash_count
     return report
@@ -697,12 +745,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("dataset_root", nargs="?", default="data_local")
     parser.add_argument("--manifest", help="optional manifest path; defaults to DATASET_ROOT/manifest.csv")
     parser.add_argument("--spec", help="local dataset spec JSON")
+    parser.add_argument(
+        "--example-spec",
+        action="store_true",
+        help="explicitly use the tracked synthetic example spec",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = validate_dataset(args.dataset_root, args.manifest, spec_path=args.spec)
+    try:
+        spec = load_dataset_spec(args.spec, allow_example=args.example_spec)
+        report = validate_dataset(args.dataset_root, args.manifest, spec=spec)
+    except (DatasetSpecError, OSError, RuntimeError, ValueError):
+        print("Dataset validation refused: DATASET_INPUT_INVALID")
+        return 2
     print(report.render())
     return 0 if report.ok else 1
 

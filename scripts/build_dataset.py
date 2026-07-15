@@ -27,7 +27,10 @@ from scripts.dataset_spec import (
     DEFAULT_APPROVED_CONSENT_TOKEN,
     DEFAULT_PENDING_CONSENT_TOKEN,
     DatasetSpec,
+    DatasetSpecError,
+    ensure_private_repo_root,
     load_dataset_spec,
+    safe_join,
 )
 
 
@@ -96,11 +99,31 @@ def _allowed_tokens(spec: DatasetSpec) -> frozenset[str]:
     return frozenset({spec.consent_tokens.pending, spec.consent_tokens.approved})
 
 
-def _load_spec(path: str | Path | None) -> DatasetSpec:
+def _load_spec(path: str | Path | None, *, example_mode: bool = False) -> DatasetSpec:
     try:
-        return load_dataset_spec(path)
+        return load_dataset_spec(path, allow_example=example_mode)
+    except DatasetSpecError as exc:
+        if "explicit dataset spec" in str(exc):
+            raise DatasetBuildError("explicit dataset spec is required") from exc
+        raise DatasetBuildError("dataset spec is invalid") from exc
     except ValueError as exc:
         raise DatasetBuildError("dataset spec is invalid") from exc
+
+
+def _require_private_root(root: Path) -> None:
+    try:
+        ensure_private_repo_root(root)
+    except DatasetSpecError as exc:
+        raise DatasetBuildError(
+            "dataset root inside the repository must be ignored by Git"
+        ) from exc
+
+
+def _safe_path(root: Path, relative: str | Path, *, must_exist: bool = False) -> Path:
+    try:
+        return safe_join(root, relative, must_exist=must_exist)
+    except DatasetSpecError as exc:
+        raise DatasetBuildError("unsafe path declared by dataset spec") from exc
 
 
 def _verify_formal_consent_ledger(
@@ -147,27 +170,23 @@ def _verify_formal_consent_ledger(
         raise DatasetBuildError("recording metadata must cover every required master")
 
     source_root = (root / "source_original").resolve()
-    data_root = root.resolve()
     for asset_id, relative_path in expected.items():
         row = by_id[asset_id]
         if (row.get("consent_status") or "").strip().lower() != "yes":
             raise DatasetBuildError("recording metadata consent_status must be yes")
         entered_relative = (row.get("relative_path") or "").strip()
-        standardized_path = (root / entered_relative).resolve()
-        try:
-            standardized_path.relative_to(data_root)
-        except ValueError as exc:
-            raise DatasetBuildError("recording metadata relative_path is invalid") from exc
-        if standardized_path != (root / relative_path).resolve():
+        standardized_path = _safe_path(root, entered_relative, must_exist=True)
+        expected_standardized = _safe_path(root, relative_path, must_exist=True)
+        if standardized_path != expected_standardized:
             raise DatasetBuildError("recording metadata relative_path does not match spec")
 
         original_value = (row.get("source_original_path") or "").strip()
         if not original_value:
             raise DatasetBuildError("recording metadata is missing source_original_path")
         original_entered = Path(original_value).expanduser()
-        original_path = (
-            original_entered if original_entered.is_absolute() else root / original_entered
-        ).resolve()
+        if original_entered.is_absolute():
+            raise DatasetBuildError("source originals must stay under source_original")
+        original_path = _safe_path(root, original_entered, must_exist=True)
         try:
             original_path.relative_to(source_root)
         except ValueError as exc:
@@ -403,23 +422,30 @@ def load_and_validate_sources(
     *,
     spec_path: str | Path | None = None,
     spec: DatasetSpec | None = None,
+    example_mode: bool = False,
     allow_missing_real: bool = False,
 ) -> tuple[dict[str, WavData], dict[str, WavData], dict[str, WavData]]:
     """Load clean, noise, and real recordings declared by the spec."""
 
-    root = Path(dataset_root)
-    loaded_spec = spec or _load_spec(spec_path)
+    root = Path(dataset_root).expanduser().resolve()
+    _require_private_root(root)
+    loaded_spec = spec or _load_spec(spec_path, example_mode=example_mode)
     clean_audio = {
-        item.id: read_pcm16_mono(root / item.path)
+        item.id: read_pcm16_mono(_safe_path(root, item.path))
         for item in loaded_spec.clean_recordings
     }
     noise_audio = {
-        item.id: read_pcm16_mono(root / item.path)
+        item.id: read_pcm16_mono(_safe_path(root, item.path))
         for item in loaded_spec.noise_recordings
     }
     real_audio: dict[str, WavData] = {}
     for item in loaded_spec.real_recordings:
-        path = root / item.path
+        try:
+            path = _safe_path(root, item.path)
+        except DatasetBuildError:
+            if allow_missing_real:
+                continue
+            raise
         if allow_missing_real and not path.is_file():
             continue
         try:
@@ -441,19 +467,23 @@ def build_dataset(
     spec_path: str | Path | None = None,
     base_seed: int = DEFAULT_BASE_SEED,
     overwrite: bool = False,
-    consent_or_license: str = PENDING_CONSENT_TOKEN,
+    consent_or_license: str | None = None,
     recording_device: str = "",
     recording_distance_cm: float | None = None,
+    example_mode: bool = False,
     allow_missing_real: bool = False,
 ) -> list[dict[str, Any]]:
     """Generate mixtures and manifests for every runnable spec row."""
 
-    spec = _load_spec(spec_path)
+    root = Path(dataset_root).expanduser().resolve()
+    _require_private_root(root)
+    spec = _load_spec(spec_path, example_mode=example_mode)
+    if consent_or_license is None:
+        consent_or_license = spec.consent_tokens.pending
     allowed_tokens = _allowed_tokens(spec)
     if not isinstance(consent_or_license, str) or consent_or_license not in allowed_tokens:
         raise DatasetBuildError("consent_or_license must use one exact workflow token")
 
-    root = Path(dataset_root)
     clean_audio, noise_audio, real_audio = load_and_validate_sources(
         root,
         spec=spec,
@@ -462,9 +492,9 @@ def build_dataset(
     if consent_or_license == spec.consent_tokens.approved:
         _verify_formal_consent_ledger(root, spec, real_audio)
 
-    manifest_csv = root / "manifest.csv"
-    manifest_json = root / "manifest.json"
-    output_paths = [root / item.path for item in spec.mixes]
+    manifest_csv = _safe_path(root, "manifest.csv")
+    manifest_json = _safe_path(root, "manifest.json")
+    output_paths = [_safe_path(root, item.path) for item in spec.mixes]
     collisions = [path for path in (*output_paths, manifest_csv, manifest_json) if path.exists()]
     if collisions and not overwrite:
         raise DatasetBuildError("target files already exist; use --overwrite")
@@ -497,7 +527,7 @@ def build_dataset(
             )
             centered_cache[noise_cache_key] = (noise_centered, noise_power)
         offset_cache[item.sample_id] = (mix_seed, noise_offset_samples)
-        mixed_path = root / item.path
+        mixed_path = _safe_path(root, item.path)
         result = _mix_centered(
             clean_centered,
             noise_centered,
@@ -624,13 +654,18 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset-root", type=Path, default=Path("data_local"))
     parser.add_argument("--spec", type=Path, default=None, help="Local dataset spec JSON")
+    parser.add_argument(
+        "--example-spec",
+        action="store_true",
+        help="explicitly use the tracked synthetic example spec",
+    )
     parser.add_argument("--base-seed", type=int, default=DEFAULT_BASE_SEED)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--allow-missing-real", action="store_true")
     parser.add_argument(
         "--consent-or-license",
-        default=PENDING_CONSENT_TOKEN,
+        default=None,
         help="Consent/license token declared by the selected spec",
     )
     parser.add_argument("--recording-device", default="")
@@ -642,11 +677,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
     try:
-        spec = _load_spec(args.spec)
+        spec = _load_spec(args.spec, example_mode=args.example_spec)
         if args.validate_only:
             _clean, _noise, real = load_and_validate_sources(
                 args.dataset_root,
                 spec=spec,
+                example_mode=args.example_spec,
                 allow_missing_real=args.allow_missing_real,
             )
             print(f"Validation passed for declared sources; real recordings loaded: {len(real)}")
@@ -660,17 +696,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             consent_or_license=args.consent_or_license,
             recording_device=args.recording_device,
             recording_distance_cm=args.recording_distance_cm,
+            example_mode=args.example_spec,
             allow_missing_real=args.allow_missing_real,
         )
     except DatasetBuildError as exc:
-        parser.exit(2, f"Dataset build failed: {exc}\n")
+        print("Dataset build refused: DATASET_INPUT_INVALID")
+        return 2
 
     mixture_rows = [row for row in rows if row["source_type"] == "controlled_mix"]
     print(
         f"Build complete: mixtures={len(mixture_rows)}, manifest rows={len(rows)}."
     )
-    print(f"CSV manifest: {args.dataset_root / 'manifest.csv'}")
-    print(f"JSON manifest: {args.dataset_root / 'manifest.json'}")
+    print("CSV manifest: manifest.csv")
+    print("JSON manifest: manifest.json")
     return 0
 
 
