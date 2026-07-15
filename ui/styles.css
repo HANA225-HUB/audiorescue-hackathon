@@ -1734,3 +1734,164 @@ button.ar-feature-action-muted {
 .ar-meeting-page .ar-meeting-mode label:has(input[checked]) * {
   color: #22170e !important;
 }
+
+/* Flatten the realtime meeting page: keep only meaningful cards and fields. */
+.ar-meeting-page .block.ar-meeting-panel-title,
+.ar-meeting-page .ar-meeting-panel-title,
+.ar-meeting-page .ar-meeting-panel-title .wrap,
+.ar-meeting-page .ar-meeting-panel-title .prose,
+.ar-meeting-page .ar-meeting-panel-title .markdown,
+.ar-meeting-page .block.ar-meeting-input,
+.ar-meeting-page .block.ar-meeting-preset,
+.ar-meeting-page .block.ar-meeting-mode,
+.ar-meeting-page .ar-meeting-input .form,
+.ar-meeting-page .ar-meeting-input .wrap,
+.ar-meeting-page .ar-meeting-preset .form,
+.ar-meeting-page .ar-meeting-preset .wrap,
+.ar-meeting-page .ar-meeting-mode .form,
+.ar-meeting-page .ar-meeting-mode .wrap {
+  border-color: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-panel-title {
+  margin: 0 0 16px !important;
+  padding: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-panel-title h3 {
+  margin: 0 !important;
+  padding: 0 !important;
+  color: #1f160f !important;
+  text-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-input,
+.ar-meeting-page .ar-meeting-preset,
+.ar-meeting-page .ar-meeting-mode {
+  margin: 0 0 16px !important;
+  padding: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-input label,
+.ar-meeting-page .ar-meeting-preset label,
+.ar-meeting-page .ar-meeting-mode > label {
+  margin-bottom: 7px !important;
+  padding: 0 !important;
+  background: transparent !important;
+  color: #2b2118 !important;
+}
+
+.ar-meeting-page .ar-meeting-input button,
+.ar-meeting-page .ar-meeting-input input,
+.ar-meeting-page .ar-meeting-input select,
+.ar-meeting-page .ar-meeting-preset textarea {
+  border: 1px solid rgba(139, 99, 60, 0.2) !important;
+  background:
+    linear-gradient(145deg, rgba(255, 248, 236, 0.68), rgba(241, 216, 186, 0.52)) !important;
+  background-color: rgba(255, 244, 226, 0.62) !important;
+  color: #2b2118 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 6px 14px rgba(101, 69, 40, 0.05) !important;
+}
+
+.ar-meeting-page .ar-meeting-mode .wrap {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 10px !important;
+  padding: 0 !important;
+}
+
+.ar-meeting-page .ar-meeting-mode label,
+.ar-meeting-page .ar-meeting-mode label * {
+  background-color: transparent !important;
+}
+
+.ar-meeting-page .ar-meeting-mode label {
+  min-height: 38px !important;
+  border: 1px solid rgba(139, 99, 60, 0.18) !important;
+  border-radius: 7px !important;
+  background:
+    linear-gradient(135deg, rgba(255, 246, 231, 0.58), rgba(230, 195, 151, 0.36)) !important;
+  color: #2b2118 !important;
+  box-shadow: 0 6px 14px rgba(94, 61, 35, 0.06) !important;
+}
+
+.ar-meeting-page .ar-meeting-mode label:has(input:checked),
+.ar-meeting-page .ar-meeting-mode label:has(input[checked]) {
+  border-color: rgba(133, 88, 48, 0.34) !important;
+  background:
+    linear-gradient(135deg, rgba(206, 153, 91, 0.68), rgba(238, 201, 146, 0.56)) !important;
+  color: #22170e !important;
+}
+
+.ar-meeting-page .ar-meeting-button-row,
+.ar-meeting-page .ar-meeting-button-row .block,
+.ar-meeting-page .ar-meeting-button-row .form,
+.ar-meeting-page .ar-meeting-button-row .wrap {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Realtime page layer cleanup: remove Gradio's extra middle surfaces. */
+.ar-meeting-page .ar-meeting-panel > .form,
+.ar-meeting-page .ar-meeting-panel > .wrap,
+.ar-meeting-page .prose.ar-meeting-status-card,
+.ar-meeting-page .prose.ar-meeting-meter,
+.ar-meeting-page .prose.ar-meeting-live-text,
+.ar-meeting-page .prose.ar-meeting-log,
+.ar-meeting-page .prose.ar-meeting-suggestion,
+.ar-meeting-page .prose.ar-meeting-float-preview {
+  border: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-panel > .form,
+.ar-meeting-page .ar-meeting-panel > .wrap {
+  padding: 0 !important;
+}
+
+.ar-meeting-page .prose.ar-meeting-status-card,
+.ar-meeting-page .prose.ar-meeting-meter,
+.ar-meeting-page .prose.ar-meeting-live-text,
+.ar-meeting-page .prose.ar-meeting-log,
+.ar-meeting-page .prose.ar-meeting-suggestion,
+.ar-meeting-page .prose.ar-meeting-float-preview {
+  padding: 0 !important;
+}
+
+.ar-meeting-page .block.ar-meeting-meter {
+  border: 1px dashed rgba(139, 99, 60, 0.34) !important;
+  background: rgba(246, 221, 188, 0.42) !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .ar-meeting-mode label * {
+  border: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.ar-meeting-page .prose.ar-meeting-float-preview::after {
+  content: none !important;
+  display: none !important;
+}
+
+.ar-meeting-page .ar-meeting-input input:disabled,
+.ar-meeting-page .ar-meeting-input select:disabled,
+.ar-meeting-page .ar-meeting-input button:disabled,
+.ar-meeting-page .ar-meeting-mode input:disabled {
+  color: #2b2118 !important;
+  -webkit-text-fill-color: #2b2118 !important;
+  opacity: 1 !important;
+}
