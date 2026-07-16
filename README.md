@@ -1,107 +1,183 @@
-# AudioRescue｜听清又听懂·智能音频急救台
+# MeetingEverywhere · AudioRescue
 
-> **比赛封存状态（2026-07-16）**：项目已结束开发并进入只读归档。最终能力、公开材料、隐私边界与复现说明见 [`ARCHIVE.md`](ARCHIVE.md)。
+> 复杂环境中，先让对方听清你的声音，再让会议助手跟上上下文。
 
-两天 Vibe Coding 黑客松项目。P0 唯一主链路：
+[![CI](https://github.com/HANA225-HUB/audiorescue-hackathon/actions/workflows/c-contract-tests.yml/badge.svg?branch=main)](https://github.com/HANA225-HUB/audiorescue-hackathon/actions/workflows/c-contract-tests.yml)
+[![Python 3.10–3.11](https://img.shields.io/badge/Python-3.10%E2%80%933.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tested on Apple Silicon](https://img.shields.io/badge/tested-Apple%20Silicon-111111?logo=apple)](#已知限制)
 
-```text
-噪声音频
-  → 48kHz / mono / PCM16 标准化
-  → DeepFilterNet 增强
-  → 原轨与增强混合轨使用同一 Whisper 配置转写
-  → A/B 播放、声谱图、文本差异与真实耗时
+MeetingEverywhere 是一个黑客松期间完成的本地优先会议原型。它把**实时麦克风降噪 / 小声增强**与**基于会前资料和会议上下文的发言提示**放在同一条链路中，同时保留 AudioRescue 的离线音频对比能力。
+
+项目已经结束比赛开发，以开源归档形式继续公开。它适合学习、复现和二次开发，但不是生产级会议、医疗或安全系统。
+
+## 能做什么
+
+| 模块 | 能力 | 当前实现 |
+|---|---|---|
+| 实时声音恢复 | 让会议软件接收到降噪后或增强后的麦克风声音 | `sounddevice` 采集，sherpa-onnx 在线 GTCRN 推理，自动增益 / 峰值保护，48 kHz 输出至 BlackHole |
+| 安静环境小声增强 | 在不经过降噪模型的情况下提高轻声可懂度 | 保留原始人声，使用语音感知自动增益、短时保持和限幅 |
+| 会议上下文助手 | 根据当前发言、议程和资料提示下一段内容，或辅助回答问题 | DashScope Fun-ASR 实时转写，本地资料解析与 BM25 检索，Qwen 结构化生成，独立悬浮窗显示 |
+| 离线音频急救 | 对文件做标准化、增强、双路转写和可视化对比 | DeepFilterNet3、Whisper、CER、波形 / 声谱图 / 文本差异、结果缓存与导出 |
+
+实时链路提供三种模式：
+
+| 模式 | 适用场景 | 处理方式 |
+|---|---|---|
+| `enhanced` | 风扇、道路声等稳定噪声环境 | GTCRN 降噪后进行电平整理与峰值保护 |
+| `quiet` | 环境安静，但必须小声说话 | 跳过 GTCRN，直接对原始人声做保真自动增益 |
+| `raw` | 调试和 A/B 对比 | 原声对齐输出 |
+
+## 系统结构
+
+```mermaid
+flowchart LR
+  Mic["物理麦克风"] --> Audio["PortAudio / sounddevice"]
+  Audio --> GTCRN["GTCRN 实时降噪"]
+  Audio --> Quiet["小声自动增益"]
+  Audio --> Raw["原声"]
+  GTCRN --> Route["48 kHz 输出与瞬时切换"]
+  Quiet --> Route
+  Raw --> Route
+  Route --> BH["BlackHole 虚拟麦克风"]
+  BH --> MeetingApp["会议软件"]
+
+  GTCRN -. "16 kHz 增强音频" .-> ASR["DashScope Fun-ASR"]
+  Docs["PDF / PPTX / DOCX / TXT / MD"] --> Local["本地解析、切分与 BM25 检索"]
+  Preset["身份 / 目标 / 议程"] --> Session["独立会议上下文"]
+  ASR --> Session
+  Local --> Session
+  Session --> Qwen["Qwen 结构化提示"]
+  Qwen --> Float["悬浮字幕与建议窗"]
 ```
 
-## 当前状态
+音频回调只做有界、非阻塞的队列操作；GTCRN 推理、实时 ASR 和模型建议分别在工作线程中运行，网络请求不会阻塞本地声音输出。
 
-- `v0.1-contract`：公共数据结构与 A 音频后端接口已经冻结；
-- C 集成分支已实现 `process_audio` 编排、中文 CER、透明缓存、P1 隔离壳、结果持久化与集成测试；
-- C 的自动测试使用确定性假后端，不代表 DeepFilterNet/Whisper 已完成真实推理验收；
-- 当前冻结候选 heads：C PR #1 `5f5addfa504164c3463a512a98e8b6878c091de7`、A PR #8 `31b35aaa1bfd523c29b6d53312b883b6710a8caf`、B PR #5 `2650d5bd5d3c968012be28a70b2799bfe87da467`、协作文档 PR #7 `934c44ba7a542c26af4af12c4567e59c5c237c04`；
-- 四方只读组合验收已通过：无冲突，targeted 185 OK / 1 skipped，full 285 OK / 1 skipped，`py_compile`、`git diff --check`、repo-safety、fixture 浏览器、隐私扫描和 UI-core 契约检查均通过；PR #5/#8/#7 仍未合并，PR #8 与公开文档 PR #9 仍为 draft，不能宣称 main 已包含或比赛 ready；
-- 本仓库当前为三人共享的公开仓库；只有受邀协作者可直接写入；
-- 模型、外部数据集、用户音频和运行产物不会提交到 Git；
-- `tests/fixtures/` 中的合成音频只用于联调，不作为比赛效果证据。
+## 五分钟体验
 
-## 三人共享方式
+### 1. 安装
 
-三个人使用同一个仓库，各自在独立分支完成模块，通过 PR 合并：
-
-| 成员 | 所有文件 |
-|---|---|
-| A | `core/audio_io.py`、`core/enhance.py`、`core/transcribe.py` 及对应测试 |
-| B | `app.py`、`ui/`、`core/visualize.py`、`core/text_diff.py` 及对应测试 |
-| C | `core/schemas.py`、`core/pipeline.py`、`core/metrics.py`、`core/cache.py`、`scripts/`、配置、集成与文档 |
-
-禁止两个人同时让 AI 修改同一个文件。公共契约只能由 C 修改。
-
-## A 开工入口
-
-1. 完整阅读 [`docs/A_BACKEND_CONTRACT_V1.md`](docs/A_BACKEND_CONTRACT_V1.md)；
-2. 只从 [`core/schemas.py`](core/schemas.py) 导入公共类型与异常；
-3. 使用不含人声的 `tests/fixtures/dev_smoke_s01_fan.wav` 验证音频 I/O/增强，再用私有台账中已授权的短样例验证双路 ASR；
-4. 先独立提交 A 的三个模块和测试，不修改 `pipeline.py`；
-5. 只返回版本、指纹前缀、耗时、通过状态、脱敏问题摘要和回滚方式；原始输出、路径、模型位置与素材信息仅记录在未跟踪的本地私有台账中。
-
-完整的两天执行手册已同步到 [`docs/handbook/`](docs/handbook/README.md)。若旧手册与实际代码契约冲突，以 `core/schemas.py`、`configs/app.yaml` 和 `docs/A_BACKEND_CONTRACT_V1.md` 为准。
-
-## 离线运行入口
-
-比赛现场以本地、断网、生产 fixture 关闭为主链路。完整步骤见 [`docs/OFFLINE_DEMO_RUNBOOK.md`](docs/OFFLINE_DEMO_RUNBOOK.md)。
-
-环境原则：
-
-- Python 使用 3.10 或 3.11；
-- PyTorch 与 TorchAudio 必须同版本、同 CPU/CUDA 来源安装；
-- `requirements.txt` 只固定项目层依赖，torch/torchaudio 按机器环境单独准备；
-- FFmpeg 必须在当前 shell 的 `PATH` 中可用；
-- DeepFilterNet3、Whisper `base`、Gradio、soundfile 在联网准备阶段完成导入和预热；
-- GPU 只作为环境加速选择，不是通用要求；不得把某台服务器配置写成现场必需项。
-
-轻量安装检查：
+推荐 Python 3.11。完整依赖包含音频、UI、DeepFilterNet 和 Whisper，首次安装与模型下载需要网络。
 
 ```bash
+git clone https://github.com/HANA225-HUB/audiorescue-hackathon.git
+cd audiorescue-hackathon
+
+conda create -n meetingeverywhere python=3.11 -y
+conda activate meetingeverywhere
+
+python -m pip install --upgrade pip
+python -m pip install torch torchaudio
 python -m pip install -r requirements.txt
-python -m pip check
-ffmpeg -version
 ```
 
-生产启动：
+macOS 真实音频链路还需要 FFmpeg、PortAudio 和一个虚拟音频设备：
 
 ```bash
-AUDIORESCUE_UI_FIXTURE=0 python app.py
+brew install ffmpeg portaudio
+brew install --cask blackhole-2ch
 ```
 
-打开页面后进入“实时会议输入”，填写会议场景、身份、听众、目标和议程，可上传 PDF、PPTX、DOCX、TXT 或 Markdown 参考资料。“开始新会议”会同时启动实时音频与一个全新的会议上下文；下一场会议不会继承上一场的转写。增强后的麦克风音频会发送至阿里云 Fun-ASR 做实时转写；生成建议时会发送会议设置、最近转写和命中的资料文字片段，但不上传原始资料文件。戴耳机时系统暂时听不到远端参会者，可在主页面或独立悬浮窗的“对方刚刚说了什么”中输入问题，也可直接在悬浮窗请求下一段建议。
+安装 BlackHole 后请重启 macOS。BlackHole 不随本仓库分发，并受其自身许可证约束。
 
-开发 fixture 启动只用于 UI 状态和离线页面门禁，不代表真实 pipeline 效果：
+### 2. 先启动公开 fixture
+
+fixture 只用于确认页面、状态流和交互，不代表真实降噪、转写或模型效果。
 
 ```bash
 AUDIORESCUE_UI_FIXTURE=1 python app.py
 ```
 
-## 配置与产物
+终端会显示本地访问地址，通常为 `http://127.0.0.1:7860`。
 
-- 冻结配置：[`configs/app.yaml`](configs/app.yaml)
-- 每次任务：`outputs/{job_id}/`
-- 正式本地数据：private data root，不会提交
-- 正式演示素材：仅经 C 审核后放入 `demo_assets/`
+### 3. 启动真实会议链路
 
-## 私有录音数据工作流
+先查看设备编号：
 
-私有录音、参考文本、授权台账、评测划分、盲听配对和运行结果都只保存在本地私有工作区。公开仓库只保留中性原则：
+```bash
+python scripts/live_gtcrn.py --list-devices
+```
 
-- 使用 synthetic fixture 做公开测试和 UI 验证；
-- approved short sample 只在本地私有台账确认后用于 smoke 或演示候选；
-- reserved evaluation set 只在冻结后一次性使用，不用于调参、公开调试或补证；
-- 公开报告只写安全摘要、测试命令和通过数量；
-- 不公开私有文本、成员映射、真实文件名、样例数量、路径、哈希、答案表或逐样例指标。
+再启动网页：
 
-具体私有数据命令由 C 在本地私有 runbook 中执行和审计，不复制到公开 PR、Issue、截图或日志。
+```bash
+AUDIORESCUE_UI_FIXTURE=0 python app.py
+```
 
-## 合入前最低检查
+页面中：
 
-不触发模型的轻量检查：
+1. 输入设备选择实际麦克风；
+2. 输出设备选择 `BlackHole 2ch`；
+3. 嘈杂环境选择 `enhanced`，安静的小声场景选择 `quiet`；
+4. 会议软件的“麦克风”选择 `BlackHole 2ch`；
+5. 会议软件的“扬声器”仍选择真实耳机，避免回声和啸叫。
+
+也可以只运行命令行实时降噪：
+
+```bash
+python scripts/live_gtcrn.py --virtual-mic --mode enhanced
+```
+
+运行中按 `E`、`V`、`R` 可切换降噪增强、小声增强和原声，按 `Q` 退出。
+
+## 启用会议助手
+
+实时转写和模型建议使用阿里云 DashScope。请在服务商控制台创建 Key，并只通过环境变量加载：
+
+```bash
+export DASHSCOPE_API_KEY="替换为你自己的 Key"
+AUDIORESCUE_UI_FIXTURE=0 python app.py
+```
+
+会前可以配置：
+
+- 会议名称、答辩 / 组会 / 汇报等场景；
+- 自己的身份、听众、会议目标和议程；
+- 重点、约束、表达风格和提示频率；
+- PDF、PPTX、DOCX、TXT 或 Markdown 参考资料。
+
+每次“开始新会议”都会创建独立上下文。系统会在本地解析、切分并检索资料，再把**会议预设、最近转写、当前问题以及命中的资料文字片段**发送给模型；原始资料文件不会直接上传。
+
+支持文字型 PDF 和 Office 文档。扫描 PDF、PPT 图片及图表当前不会自动 OCR。
+
+### 数据流与隐私
+
+| 数据 | 去向 |
+|---|---|
+| 麦克风音频 | 本机完成 GTCRN / 小声增强；启用会议助手后，增强后的 16 kHz 音频会发送给 DashScope Fun-ASR |
+| 会前资料 | 原文件在本地解析；与当前问题相关的文字片段会发送给 Qwen |
+| API Key | 从环境变量读取，不应写入代码、配置、截图或 Issue |
+| 用户录音和运行产物 | 默认由 `.gitignore` 排除，不应提交到公共仓库 |
+
+不要把机密会议资料、个人隐私或未获授权的录音发送给不符合你所在组织政策的云服务。
+
+## 离线音频急救
+
+`core/pipeline.py` 保留了文件处理主链：
+
+```text
+音频校验
+  → 48 kHz / mono / PCM16 标准化
+  → DeepFilterNet3 增强
+  → 原声、混合增强、完整增强三轨
+  → 使用同一 Whisper 配置做前后转写
+  → CER、响度、波形、声谱图和文本差异
+```
+
+完整离线准备与演示步骤见 [`docs/OFFLINE_DEMO_RUNBOOK.md`](docs/OFFLINE_DEMO_RUNBOOK.md)。
+
+## Demo 资料
+
+[`demo_assets/transformer_defense_demo/`](demo_assets/transformer_defense_demo/) 提供一套不含私人素材的 Transformer 小型答辩演示包，包括：
+
+- 会前预设；
+- 可上传的三份知识资料；
+- 完整口播稿；
+- 逐镜头录制方案与故障预案。
+
+仓库不包含团队真人录音、原始 Demo 视频或嵌入个人音频的 PPT。
+
+## 测试
 
 ```bash
 python -m py_compile app.py core/*.py ui/*.py scripts/*.py
@@ -109,82 +185,36 @@ python -m unittest discover -s tests -p "test_*.py" -q
 git diff --check
 ```
 
-需要预热模型和授权短样例的完整 smoke：
+比赛封存版本在 Python 3.11 环境中通过 **373 项自动测试**。CI 会在 Python 3.10 / 3.11 上执行契约、数据安全和离线 UI 测试。
 
-```bash
-python scripts/smoke_audio_core.py --normalize-only
-python scripts/smoke_audio_core.py --runs 2 --asr-model base --device auto
-```
+## 已知限制
 
-公开报告只记录版本、耗时、指纹摘要、测试数量和成功/失败状态。不得公开原始日志、私有文本、机器路径、服务器路径或模型缓存位置。历史本地 CPU smoke 只能作为技术门禁证据；服务器 GPU 补证仍为 provisional，不作为正式速度证据。真实用户样例、听感和效果验收仍需最终人工执行。
+- 实时声音恢复目前只在 Apple Silicon macOS 上完成实际设备验证；
+- 不同会议软件对虚拟麦克风、自带自动增益和降噪的处理不同，需要逐个验证；
+- 戴耳机时，系统尚不能稳定自动听见远端参会者；当前可在悬浮窗手工输入对方问题；
+- 尚未实现多说话人分离、声纹识别或稳定的系统音频回环；
+- 实时转写和会议建议依赖网络与 DashScope 服务；
+- fixture 只证明 UI 和契约链路，不能作为音频效果证据；
+- 这是研究与比赛原型，不保证适合所有声学环境或业务合规要求。
 
-## M4 实时降噪与会议虚拟麦
-
-这条独立链路不会改动上面的文件后处理流程：
+## 项目结构
 
 ```text
-降噪模式：物理麦克风 → GTCRN 降噪 → 自动增益/限幅 → 48 kHz 声卡或虚拟麦
-小声模式：物理麦克风 → 保真人声自动增益/限幅 → 48 kHz 声卡或虚拟麦
+app.py                    Gradio 产品入口
+core/live_denoise.py      GTCRN、小声增强、实时队列与声卡引擎
+core/realtime_asr.py      DashScope Fun-ASR 协议
+core/meeting_context.py   会前资料、BM25、议程状态与会话上下文
+core/meeting_assistant.py Qwen 建议与异步编排
+core/pipeline.py          离线音频急救主链
+ui/                       网页、悬浮窗和控制器
+scripts/live_gtcrn.py     实时音频命令行入口
+tests/                    合成 fixture 与自动测试
 ```
 
-首次运行会下载并校验约 524 KB 的 GTCRN 模型。让会议中的其他人听到增强结果，需要安装一次 BlackHole，安装后重启 Mac：
+比赛归档状态、公开范围和复现边界见 [`ARCHIVE.md`](ARCHIVE.md)。AI 协作使用说明见 [`AI_USAGE.md`](AI_USAGE.md)。
 
-```bash
-conda activate audiorescue-real
-brew install --cask blackhole-2ch
-# 重启后
-python scripts/live_gtcrn.py --list-devices
-python scripts/live_gtcrn.py --virtual-mic
-```
+## 开源与第三方组件
 
-会议软件里把“麦克风”选成 `BlackHole 2ch`，把“扬声器”保留为真实耳机；首次对比时先关闭会议软件自带的自动增益和强降噪，避免双重处理。运行中按空格在原声与增强之间切换，按 `E` 只用增强，按 `R` 只用原声，按 `Q` 退出。只在自己的耳机中试听时，可把 `--output-device` 指向耳机。只验证声卡、不播放声音时可运行：
+本仓库自有代码和文档采用 [MIT License](LICENSE) 开源。运行时模型、外部驱动、云服务以及第三方依赖仍遵循各自许可证和服务条款，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
-```bash
-python scripts/live_gtcrn.py --duration 2 --gain 0
-```
-
-安静环境需要小声说话时，使用独立的小声增强模式。该模式保留原始人声后再做自动增益和限幅，不让 GTCRN 先把很小的语音当作噪声削弱：
-
-```bash
-python scripts/live_gtcrn.py --input-device 0 --virtual-mic --mode quiet
-```
-
-运行中按 `V` 进入小声增强，按 `E` 进入 GTCRN 降噪增强，按 `R` 切换原声。
-
-### 实时会议提词
-
-配置好 `DASHSCOPE_API_KEY` 后，可以把增强后的 16 kHz 音频同时送给 Fun-ASR，并由千问根据会前预设生成短提示：
-
-```bash
-conda activate audiorescue-real
-python scripts/live_gtcrn.py \
-  --input-device 1 \
-  --virtual-mic \
-  --meeting \
-  --meeting-preset "黑客马拉松项目汇报；我负责实时降噪和会议助手，回答要简洁、准确。"
-```
-
-终端会显示实时字幕和 `[建议]`；按 `N` 可以立即生成下一句建议。转写只在一句结束后触发千问，不会让网络请求阻塞实时降噪。
-
-答辩、组会或比赛汇报可以在会前把身份、目标、议程和资料分开配置。每次启动都会创建新的会议上下文；资料先在本地解析和检索。每次调用会把会议设置、最近转写和当前问题命中的资料片段发给阿里云千问，不上传 PDF/PPT/DOCX 原始文件。很短的文字资料可能大部分或全部落入一个命中片段，请只使用已获授权的参会内容和资料，并避免放入不必要的敏感信息：
-
-```bash
-python scripts/live_gtcrn.py \
-  --input-device 1 \
-  --virtual-mic \
-  --meeting \
-  --meeting-name "AudioRescue 项目答辩" \
-  --meeting-scenario defense \
-  --meeting-role "项目成员" \
-  --meeting-audience "导师和评委" \
-  --meeting-objective "讲清实时降噪、会议助手和实测结果" \
-  --meeting-agenda "问题背景,实时降噪,会议助手,实验结果,总结" \
-  --meeting-focus "遇到实验数字时必须以资料为准" \
-  --meeting-preset "回答简洁，不夸大效果；一段讲完后再提示下一段。" \
-  --meeting-material docs/答辩稿.pptx \
-  --meeting-material docs/项目论文.pdf
-```
-
-支持文字型 PDF、PPTX、DOCX、TXT 和 Markdown。扫描 PDF、PPT 图片和图表暂时不会自动 OCR。网页右侧的对方问题输入框会调用 `request_answer(对方问题)`，避免把自己的最后一句误当成导师提问。
-
-当前 ASR 只接收本机麦克风链路。线上会议戴耳机时，它通常听不到导师/对方的声音，因此不能承诺自动识别远端提问；这需要后续增加独立的会议系统音频输入，且不能把该输入再次回送到虚拟麦克风。
+如果提交 Issue，请不要附带 API Key、私人音频、会议正文、模型缓存路径或其他敏感数据。
